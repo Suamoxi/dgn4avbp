@@ -18,7 +18,7 @@ class cfd_datamodule(L.LightningDataModule):
         metadata =  [read_metadata(metadata_file) for metadata_file in metadata_files]
         # Specify batch sizes for each dataset
         self.batch_sizes = [info['batch_size'] for info in metadata]  # Adjust these as needed
-    
+        print(self.batch_sizes)
         # Specify loader types for each dataset
         self.loader_types = ['default']*len(metadata_files)  # Example: using different loader types
     
@@ -58,6 +58,9 @@ class cfd_datamodule(L.LightningDataModule):
         return self.val_cfd_datamodule.get_combined_loader(mode='sequential')
     
 
+
+
+
 metadata_files = [
         os.path.join('/scratch/coop/theret/cfd-dataset/tutorial/sample_dataset/metadata.yaml')
    ]
@@ -70,8 +73,8 @@ diffusion_process = DiffusionProcess(
 
 # Model
 arch = {
-    'in_node_features':   8,
-    'cond_node_features': 0,
+    'in_node_features':   6,
+    'cond_node_features': 2,
     'cond_edge_features': 3,
     'depths':             [3],
     'fnns_width':         128,
@@ -96,11 +99,74 @@ lit = LitDiffusionCFD(
     step_sampler_factory=step_sampler_factory,
     lr=1e-4,
     scheduler_cfg={"factor":0.1, "patience":50},
-    use_past_as_cond=False,    # set True if you want to concatenate past frames into .cond
+    pack_mode="y_window_cond_static",
+    pack_win_len=1,            # <— use these names
+    pack_stride=1,
+    pack_select="last",
+    y_idx=[0,1,2,3,4,5],
+    cond_idx=[6,7],
 )
+
 
 # DataModule from your CFDDataset
 dm = cfd_datamodule(metadata_files, train_val_split=0.8)
+dm.setup(stage='fit')
+# Get the combined loader
+combined_loader = dm.train_dataloader()
+cfd_datamodule_train  = dm.train_cfd_datamodule
+print(f"Number of subdatasets: {len(cfd_datamodule_train.subdatasets)}")
+for i, subdataset in enumerate(cfd_datamodule_train.subdatasets):
+        print(f"Subdataset {i+1} batch size: {dm.batch_sizes[i]}")
+
+from torch_geometric.data import Data, Batch
+
+def get_sequence_from_combined(item):
+    # item may be: (batches, batch_idx, dataloader_idx) OR just `batches`
+    if isinstance(item, tuple) and len(item) == 3:
+        batches, _batch_idx, _dl_idx = item
+    else:
+        batches = item
+
+    # If CombinedLoader was built as {"main": loader}
+    if isinstance(batches, dict):
+        sequence = next(iter(batches.values()))
+    else:
+        sequence = batches
+
+    # Some wrappers yield a tuple rather than list — treat them the same.
+    if isinstance(sequence, tuple):
+        sequence = list(sequence)
+    return sequence  # list[Batch]
+
+def print_batch_info(sequence):
+    assert isinstance(sequence, (list, tuple)), f"Expected list/tuple, got {type(sequence)}"
+    print(f"    Number of time steps in batch: {len(sequence)}")
+    for t, g in enumerate(sequence):
+        # If someone tucked the Batch inside {"main": Batch} per time-step:
+        if isinstance(g, dict) and "main" in g:
+            g = g["main"]
+        assert isinstance(g, (Batch, Data)), f"Time step {t} is {type(g)}"
+        print(f"    Time step {t+1}:")
+        print(f"        Number of graphs in batch: {g.num_graphs}")
+        print(f"        Total number of nodes: {g.num_nodes}")
+        print(f"        Total number of edges: {g.num_edges}")
+        if hasattr(g, 'target'):
+            print(f"        target shape: {tuple(g.target.shape)}")
+        if hasattr(g, 'edge_attr'):
+            print(f"        edge_attr shape: {tuple(g.edge_attr.shape)}")
+        if hasattr(g, 'cells') and isinstance(g.cells, list) and g.cells and g.cells[0] is not None:
+            print(f"        Total number of cells: {len(g.cells[0])}")
+        if hasattr(g, 'time'):
+            print(f"        time mean per-graph: {g.time.view(g.num_graphs, -1).mean(dim=-1)}")
+
+# # Iterate safely
+# for i, item in enumerate(combined_loader):
+#     print(f"\nBatch {i+1}:")
+#     sequence = get_sequence_from_combined(item)
+#     print("Dataloader main (Type: Default):")
+#     print_batch_info(sequence)
+    
+
 
 # Trainer
 prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow", progress_bar="green1", progress_bar_finished="green1", progress_bar_pulse="#6206E0", batch_progress="green_yellow", time="grey82", processing_speed="grey82", metrics="grey82", metrics_text_delimiter="\n", metrics_format=".3e"))
@@ -108,4 +174,5 @@ ckpt = ModelCheckpoint(dirpath="checkpoints", filename="diffusion-{epoch}", moni
 trainer = L.Trainer(max_epochs=2, accelerator="auto", precision="16-mixed", callbacks=[ckpt, prog_bar], log_every_n_steps=10, limit_val_batches=20, limit_train_batches=80)
 
 # Train
-trainer.fit(lit, dm)
+trainer.fit(lit, dm) 
+

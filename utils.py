@@ -232,6 +232,15 @@ def create_graph_data(node_positions, edge_indices, simulation_file, metadata, c
         edge_attr = node_positions[edge_indices[1]] - node_positions[edge_indices[0]] #Edge attributes
     )
 
+
+    # def inspect_target_brief(graph, names=None, nrows=5):
+    #     t = graph.target
+    #     print(f"target: shape={tuple(t.shape)}, dtype={t.dtype}, device={t.device}")
+    #     if names is not None:
+    #         print("channel names:", names)
+    #     print("first rows:\n", t[:nrows].detach().cpu())
+    # inspect_target_brief(graph_data)
+
     return graph_data
 
 def find_path_in_hdf5(hdf5_file, target_name):
