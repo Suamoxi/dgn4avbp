@@ -103,8 +103,8 @@ lit = LitDiffusionCFD(
     pack_win_len=1,            # <— use these names
     pack_stride=1,
     pack_select="random",
-    y_idx=[0,1,2,3,4,5],
-    cond_idx=[6,7],
+    y_idx=[0],
+    cond_idx=[1,2,3,4,5,6,7],
 )
 
 
@@ -171,7 +171,14 @@ def print_batch_info(sequence):
 # Trainer
 prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow", progress_bar="green1", progress_bar_finished="green1", progress_bar_pulse="#6206E0", batch_progress="green_yellow", time="grey82", processing_speed="grey82", metrics="grey82", metrics_text_delimiter="\n", metrics_format=".3e"))
 ckpt = ModelCheckpoint(dirpath="checkpoints", filename="diffusion-{epoch}", monitor="val/loss", mode="min", save_top_k=3)
-trainer = L.Trainer(max_epochs=2, accelerator="auto", precision="16-mixed", callbacks=[ckpt, prog_bar], log_every_n_steps=10, limit_val_batches=20, limit_train_batches=80)
+trainer = L.Trainer(max_epochs=2, 
+                    accelerator="auto", 
+                    precision="16-mixed", 
+                    callbacks=[ckpt, prog_bar], 
+                    log_every_n_steps=10, 
+                    limit_val_batches=20, 
+                    limit_train_batches=80,
+                    accumulate_grad_batches=64)
 
 # Train
 trainer.fit(lit, dm) 
