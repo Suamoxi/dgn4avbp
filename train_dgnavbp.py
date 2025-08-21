@@ -102,7 +102,7 @@ lit = LitDiffusionCFD(
     pack_mode="y_window_cond_static",
     pack_win_len=1,            # <— use these names
     pack_stride=1,
-    pack_select="last",
+    pack_select="random",
     y_idx=[0,1,2,3,4,5],
     cond_idx=[6,7],
 )
