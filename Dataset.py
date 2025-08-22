@@ -7,6 +7,10 @@ from utils import read_metadata, load_coo_data, load_simulation_data, create_gra
 from lightning.pytorch.utilities import CombinedLoader
 from torchvision import transforms as tv_transforms
 import torch
+from torchvision import transforms as T
+
+
+
 
 class CFDSubDataset(IterableDataset):
     def __init__(self, metadata_file, start_idx, shuffle=False, split=1.0, flag: str = 'train'):
@@ -100,7 +104,15 @@ class CFDDataset:
         }
 
         if loader_type == 'default':
-            return DataLoader(subdataset, **common_kwargs)
+            return DataLoader(
+                            subdataset,
+                            batch_size=batch_size,
+                            num_workers=0,
+                            collate_fn=self._sequence_collate,   # <-- important
+                            drop_last=False,
+                            pin_memory=False,
+                        )
+            #return Dataloader(subdataset, **common_kwargs)
         elif loader_type == 'node':
             return NodeLoader(
                 subdataset,
@@ -132,5 +144,6 @@ class CFDDataset:
             return CombinedLoader({"main": self.dataloaders[0]}, mode=mode)
         return CombinedLoader(self.dataloaders, mode=mode)
 
-def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx, shuffle=False, split=1.0, flag='train', nodes_per_sample=None):
-    return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx, shuffle, split, flag, nodes_per_sample)
+def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx, shuffle=False,  collater_transform=None,split=1.0, flag='train', nodes_per_sample=None):
+    return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx, shuffle, split, flag, nodes_per_sample, collater_transform=collater_transform,)
+

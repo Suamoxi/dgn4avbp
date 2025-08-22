@@ -9,6 +9,9 @@ from dgn4avbp.lit_dgn import LitDiffusionCFD
 from dgn4avbp.losses import HybridLoss
 from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
+from torchvision import transforms as T
+from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr, EdgeCondFreeStreamLocalAxes, ScaleAttr
+from dgn4avbp.transform_locals import MeshCoarsening  # put your pasted class here
 
 class cfd_datamodule(L.LightningDataModule):
     def __init__(self, metadata_files, train_val_split = 0.8):
@@ -65,6 +68,19 @@ metadata_files = [
         os.path.join('/scratch/coop/theret/cfd-dataset/tutorial/sample_dataset/metadata.yaml')
    ]
 
+graph_transform = T.Compose([
+    EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
+    ScaleEdgeAttr(0.015),                   # like DGN4CFD
+    #EdgeCondFreeStreamLocalAxes([...]),     # optional: your edge_cond
+    ScaleAttr('target', vmin=0, vmax=1000),# your ranges
+    MeshCoarsening(
+        num_scales=4,
+        max_indegree=None,
+        rel_pos_scaling=[0.015, 0.03, 0.06, 0.12],
+        scalar_rel_pos=True,
+    ),
+])
+
 # Diffusion process
 diffusion_process = DiffusionProcess(
     num_steps     = 1000,
@@ -76,7 +92,7 @@ arch = {
     'in_node_features':   6,
     'cond_node_features': 2,
     'cond_edge_features': 3,
-    'depths':             [3],
+    'depths':             [2,2,2,2],
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
