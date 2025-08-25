@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset,DataLoader,IterableDataset
+from torch.utils.data import Dataset,IterableDataset
 from dgn4avbp.loader import Collater
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import NodeLoader, NeighborLoader
@@ -9,8 +9,11 @@ from torchvision import transforms as tv_transforms
 import torch
 from torchvision import transforms as T
 
-
-
+from torch.utils.data import DataLoader as TorchDataLoader
+import torch
+# in Dataset.py
+from dgn4avbp.loader import Collater  # your custom collater
+from torch_geometric.data import Batch
 
 class CFDSubDataset(IterableDataset):
     def __init__(self, metadata_file, start_idx, shuffle=False, split=1.0, flag: str = 'train'):
@@ -61,72 +64,56 @@ class CFDSubDataset(IterableDataset):
                 if self.shuffle:
                     self.current_idx = torch.randperm(len(self.idx))
 
+
+
 class CFDDataset:
     def __init__(self, 
-                 metadata_files, 
-                 batch_sizes, 
-                 loader_types, 
-                 start_idx, 
-                 shuffle=False, 
-                 split=1.0, 
-                 flag='train', 
-                 nodes_per_sample=None,
-                 collater_transform: tv_transforms.Compose = None,  # <- optional, applied on the BATCH
+        metadata_files, batch_sizes, loader_types, start_idx, 
+        shuffle=False, split=1.0, flag='train', nodes_per_sample=None,
+        collater_transform=None,   # <— add this
     ):
         self.subdatasets = []
         self.dataloaders = []
-        self.collater = Collater(transform=collater_transform)
+        self.collater = Collater(transform=collater_transform)  # <— use it
 
         for metadata_file, batch_size, loader_type, start in zip(metadata_files, batch_sizes, loader_types, start_idx):
             subdataset = CFDSubDataset(metadata_file, start, shuffle, split, flag)
             self.subdatasets.append(subdataset)
         
-        for subdataset in self.subdatasets:
-            dataloader = self.create_dataloader(subdataset, batch_size, loader_type, nodes_per_sample)
-            self.dataloaders.append(dataloader)
-    
+        for subdataset, batch_size, loader_type in zip(self.subdatasets, batch_sizes, loader_types):
+            self.dataloaders.append(self.create_dataloader(subdataset, batch_size, loader_type, nodes_per_sample))
+
     def _sequence_collate(self, batch: list[list[Data]]):
-        """batch is a list of sequences; each sequence is a list[Data] of length seq_len.
-           We collate per time-step using your Collater (which fixes multiscale indices)."""
+        # batch is a list of sequences; each sequence is a list[Data] (len = seq_len).
         seq_len = len(batch[0])
-        batched_sequence = []
+        out = []
         for t in range(seq_len):
-            graphs_at_t = [seq[t] for seq in batch]                       # List[Data] at time t
-            batched_graphs = self.collater.collate(graphs_at_t)           # <- use your Collater here
-            batched_sequence.append(batched_graphs)                       # Batch
-        return batched_sequence                                           # List[Batch] length seq_len
-    
+            graphs_at_t = [seq[t] for seq in batch]     # List[Data] at time t
+            batched = self.collater.collate(graphs_at_t)  # <-- Collater fixes multiscale indices and applies transforms
+            out.append(batched)
+        return out
+
+
+
     def create_dataloader(self, subdataset, batch_size, loader_type, nodes_per_sample):
         common_kwargs = {
             'batch_size': batch_size,
-            'collate_fn': self.collate_fn,
-            'num_workers': 0
+            'collate_fn': self._sequence_collate,   # <-- uses Collater(transform=...)
+            'num_workers': 0,
+            # DO NOT put 'shuffle' here for IterableDataset
         }
 
-        if loader_type == 'default':
-            return DataLoader(
-                            subdataset,
-                            batch_size=batch_size,
-                            num_workers=0,
-                            collate_fn=self._sequence_collate,   # <-- important
-                            drop_last=False,
-                            pin_memory=False,
-                        )
-            #return Dataloader(subdataset, **common_kwargs)
-        elif loader_type == 'node':
-            return NodeLoader(
-                subdataset,
-                num_nodes=nodes_per_sample,
-                **common_kwargs
-            )
-        elif loader_type == 'neighbor':
-            return NeighborLoader(
-                subdataset,
-                num_neighbors=[8, 8, 8],  # Adjust these values as needed
-                **common_kwargs
-            )
-        else:
+        if loader_type != 'default':
             raise ValueError(f"Unsupported loader type: {loader_type}")
+
+        if isinstance(subdataset, torch.utils.data.IterableDataset):
+            # No shuffle arg allowed; you already randomize order inside __iter__
+            return TorchDataLoader(subdataset, **common_kwargs)
+        else:
+            # Map-style datasets can use shuffle
+            return TorchDataLoader(subdataset, shuffle=getattr(subdataset, 'shuffle', False), **common_kwargs)
+
+
 
     @staticmethod
     def collate_fn(batch):
@@ -144,6 +131,10 @@ class CFDDataset:
             return CombinedLoader({"main": self.dataloaders[0]}, mode=mode)
         return CombinedLoader(self.dataloaders, mode=mode)
 
-def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx, shuffle=False,  collater_transform=None,split=1.0, flag='train', nodes_per_sample=None):
-    return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx, shuffle, split, flag, nodes_per_sample, collater_transform=collater_transform,)
-
+def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx,
+                          shuffle=False, split=1.0, flag='train',
+                          nodes_per_sample=None,
+                          collater_transform=None):     # <— add this
+    return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx,
+                      shuffle, split, flag, nodes_per_sample,
+                      collater_transform=collater_transform)

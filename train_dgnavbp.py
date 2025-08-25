@@ -35,10 +35,18 @@ class cfd_datamodule(L.LightningDataModule):
     def setup(self, stage: str):
         # Assign train/val datasets for use in dataloaders
         if stage == "fit":
-            self.train_cfd_datamodule = create_cfd_datamodule(self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
-                                        shuffle=True, split=self.split, flag='train')
-            self.val_cfd_datamodule = create_cfd_datamodule(self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
-                                        shuffle=False, split=self.split, flag='val')
+            # inside cfd_datamodule.setup(...)
+            self.train_cfd_datamodule = create_cfd_datamodule(
+                self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
+                shuffle=True, split=self.split, flag='train',
+                collater_transform=graph_transform,     # <— HERE
+            )
+            self.val_cfd_datamodule = create_cfd_datamodule(
+                self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
+                shuffle=False, split=self.split, flag='val',
+                collater_transform=graph_transform,     # <— HERE too
+            )
+
         
         # Assign test dataset for use in dataloader(s)
         if stage == "test":
@@ -89,8 +97,8 @@ diffusion_process = DiffusionProcess(
 
 # Model
 arch = {
-    'in_node_features':   6,
-    'cond_node_features': 2,
+    'in_node_features':   1,
+    'cond_node_features': 7,
     'cond_edge_features': 3,
     'depths':             [2,2,2,2],
     'fnns_width':         128,
