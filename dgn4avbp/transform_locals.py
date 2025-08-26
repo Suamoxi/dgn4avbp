@@ -1,10 +1,7 @@
 # dgn4avbp/transforms_local.py
 import torch
 import math
-
-import torch
 from torch_geometric.utils import coalesce, remove_self_loops
-    
 from torch_geometric.data import Data
 
 class EnsureEdgeAttrFromPos:

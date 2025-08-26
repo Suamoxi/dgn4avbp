@@ -98,12 +98,13 @@ diffusion_process = DiffusionProcess(
 # Model
 arch = {
     'in_node_features':   1,
-    'cond_node_features': 7,
+    'cond_node_features': 2,
     'cond_edge_features': 3,
     'depths':             [2,2,2,2],
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
+    'dim':                  2
 }
 net = DiffusionGraphNet(
     diffusion_process  = diffusion_process,
@@ -128,7 +129,7 @@ lit = LitDiffusionCFD(
     pack_stride=1,
     pack_select="random",
     y_idx=[0],
-    cond_idx=[1,2,3,4,5,6,7],
+    cond_idx=[1,2],
 )
 
 

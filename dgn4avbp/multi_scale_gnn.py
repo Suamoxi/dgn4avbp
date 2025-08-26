@@ -37,8 +37,8 @@ class MultiScaleGnn(nn.Module):
         activation:       nn.Module = nn.SELU,
         dropout:          float     = 0.0,
         scale_0:          int       = 0,
-        dim:              int       = 2,
-        scalar_rel_pos:   bool      = True,
+        dim:              int       = 3,
+        scalar_rel_pos:   bool      = False,
     ) -> None:
         scales = len(depths)
         # Validate the hyperparameters
@@ -161,7 +161,7 @@ class MultiScaleGnn(nn.Module):
             dropout:        float      = 0.0,
             aggr:           str        = 'mean',
             depth:          int        = 1,
-            dim:            int        = 2,
+            dim:            int        = 3,
             scalar_rel_pos: bool       = True,
         ) -> None:
             # Validate inputs
@@ -243,7 +243,7 @@ class MultiScaleGnn(nn.Module):
             dropout:        float = 0.0,
             aggr:           str = 'mean',
             depth:          int = 1,
-            dim:            int = 2,
+            dim:            int = 3,
             scalar_rel_pos: bool = True,
         ) -> None:
             # Validate inputs

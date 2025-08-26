@@ -2,7 +2,7 @@ from torch.utils.data import Dataset,IterableDataset
 from dgn4avbp.loader import Collater
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import NodeLoader, NeighborLoader
-from torch_geometric.utils import to_undirected
+from torch_geometric.utils import to_undirected, coalesce
 from utils import read_metadata, load_coo_data, load_simulation_data, create_graph_data, create_data_list
 from lightning.pytorch.utilities import CombinedLoader
 from torchvision import transforms as tv_transforms
@@ -24,6 +24,7 @@ class CFDSubDataset(IterableDataset):
             self.metadata['coordinate_paths']
         )
         self.edge_indices = to_undirected(self.edge_indices)
+        self.edge_indices = coalesce(self.edge_indices, sort_by_row=False)
         self.file_list, self.it_list_total = create_data_list(
             [self.metadata['solution_directory']],
             self.metadata['seq_len'],
