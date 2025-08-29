@@ -1,6 +1,6 @@
 import os
-from Dataset import create_cfd_datamodule
-from utils import read_metadata
+from Dataset import create_cfd_datamodule,estimate_mesh_scales,_sample_graphs_for_stats
+from utils import read_metadata,load_coo_data,create_data_list,create_graph_data
 import lightning as L
 from dgn4avbp.diffusion_process import DiffusionProcess
 from dgn4avbp.dgn_model import DiffusionGraphNet
@@ -10,51 +10,111 @@ from dgn4avbp.losses import HybridLoss
 from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from torchvision import transforms as T
-from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr, EdgeCondFreeStreamLocalAxes, ScaleAttr
+from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr,ScaleAttr,ZScoreTarget
 from dgn4avbp.transform_locals import MeshCoarsening  # put your pasted class here
+from torch_geometric.data import Data, Batch
+import torch
+
+from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr, MeshCoarsening, ZScoreTarget
+from torchvision import transforms as T
+import torch
+
+def _sample_graphs_for_stats(meta, K=4):
+    pos0, edge_index0, cells0 = load_coo_data(
+        meta['coo_file'], meta['mesh_file'], meta['coordinate_paths']
+    )
+    file_list, it_list_total = create_data_list(
+        [meta['solution_directory']],
+        meta['seq_len'],
+        meta['solution_prefix']
+    )
+    K = min(K, len(it_list_total))
+    samples = []
+    for k in range(K):
+        case, sim, t = it_list_total[k][0]        # take the first step of each sequence
+        fpath = file_list[str(case)][str(t)]
+        g = create_graph_data(pos0, edge_index0, fpath, meta, cells0)
+        samples.append(g)
+    return samples, pos0, edge_index0
+
+def _estimate_mesh_scales(pos, edge_index, quantile=0.5):
+    row, col = edge_index
+    edge_len = (pos[col] - pos[row]).norm(dim=1)
+    h = edge_len.quantile(quantile).item()
+    rel_pos_scaling = [h, 2*h, 4*h, 8*h]
+    return h, rel_pos_scaling
 
 class cfd_datamodule(L.LightningDataModule):
-    def __init__(self, metadata_files, train_val_split = 0.8):
+    def __init__(self, metadata_files, train_val_split=0.8):
         super().__init__()
-        
         self.metadata_files = metadata_files
-        metadata =  [read_metadata(metadata_file) for metadata_file in metadata_files]
-        # Specify batch sizes for each dataset
-        self.batch_sizes = [info['batch_size'] for info in metadata]  # Adjust these as needed
-        print(self.batch_sizes)
-        # Specify loader types for each dataset
-        self.loader_types = ['default']*len(metadata_files)  # Example: using different loader types
-    
-        # Specify at what index we start sampling from Dataset
-        self.start_idx = [0]*len(metadata_files)
-        self.split = train_val_split
+        metadata = [read_metadata(mf) for mf in metadata_files]
+        self.batch_sizes  = [info['batch_size'] for info in metadata]
+        self.loader_types = ['default'] * len(metadata_files)
+        self.start_idx    = [0] * len(metadata_files)
+        self.split        = train_val_split
 
-    def prepare_data(self):
-        None
+        # will be set in setup()
+        self.graph_transform = None
+        self._zscore_mean = None
+        self._zscore_std  = None
+        self._rel_pos_scales = None
+        self._h = None
 
     def setup(self, stage: str):
-        # Assign train/val datasets for use in dataloaders
+        # --- compute stats ONCE from the first dataset (or loop over all and concat) ---
+        meta0 = read_metadata(self.metadata_files[0])
+        samples, pos0, edge_index0 = _sample_graphs_for_stats(meta0, K=4)
+
+        # target mean/std (your target has 3 velocity components)
+        tgt = torch.cat([g.target for g in samples], dim=0)  # shape (N_total, 3)
+        self._zscore_mean = tgt.mean(0)                      # (3,)
+        self._zscore_std  = tgt.std(0)                       # (3,)
+
+        # mesh scales for edge normalization & LR scaling
+        self._h, self._rel_pos_scales = _estimate_mesh_scales(pos0, edge_index0)
+
+        # --- build the graph transform pipe (reused for train/val/test) ---
+        self.graph_transform = T.Compose([
+            EnsureEdgeAttrFromPos(),         # edge_attr = pos[j]-pos[i]
+            ScaleEdgeAttr(self._h),          # normalize HR edge vectors by median spacing
+            ZScoreTarget(self._zscore_mean, self._zscore_std),  # normalize targets
+            MeshCoarsening(
+                num_scales=4,
+                max_indegree=None,           # set later for unstructured meshes
+                rel_pos_scaling=None,
+                scalar_rel_pos=False,         # keep 3D vectors for LR edges
+            ),
+        ])
+
+        # --- create loaders with this transform applied in the Collater ---
         if stage == "fit":
-            # inside cfd_datamodule.setup(...)
             self.train_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=True, split=self.split, flag='train',
-                collater_transform=graph_transform,     # <— HERE
+                collater_transform=self.graph_transform
             )
             self.val_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=False, split=self.split, flag='val',
-                collater_transform=graph_transform,     # <— HERE too
+                collater_transform=self.graph_transform
             )
 
-        
-        # Assign test dataset for use in dataloader(s)
         if stage == "test":
-            self.val_cfd_datamodule = create_cfd_datamodule(self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
-                                        shuffle=False, split=self.split, flag='val')
+            self.val_cfd_datamodule = create_cfd_datamodule(
+                self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
+                shuffle=False, split=self.split, flag='val',
+                collater_transform=self.graph_transform
+            )
         if stage == "predict":
-            self.val_cfd_datamodule = create_cfd_datamodule(self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
-                                        shuffle=False, split=self.split, flag='val')
+            self.val_cfd_datamodule = create_cfd_datamodule(
+                self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
+                shuffle=False, split=self.split, flag='val',
+                collater_transform=self.graph_transform
+            )
+
+    def prepare_data(self):
+        None
 
     def train_dataloader(self):
         return self.train_cfd_datamodule.get_combined_loader()
@@ -76,18 +136,18 @@ metadata_files = [
         os.path.join('/scratch/coop/theret/cfd-dataset/tutorial/sample_dataset/metadata.yaml')
    ]
 
-graph_transform = T.Compose([
-    EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
-    ScaleEdgeAttr(0.015),                   # like DGN4CFD
-    #EdgeCondFreeStreamLocalAxes([...]),     # optional: your edge_cond
-    ScaleAttr('target', vmin=0, vmax=1000),# your ranges
-    MeshCoarsening(
-        num_scales=4,
-        max_indegree=None,
-        rel_pos_scaling=[0.015, 0.03, 0.06, 0.12],
-        scalar_rel_pos=True,
-    ),
-])
+# graph_transform = T.Compose([
+#     EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
+#     ScaleEdgeAttr(0.015),                   # like DGN4CFD
+#     #EdgeCondFreeStreamLocalAxes([...]),     # optional: your edge_cond
+#     ScaleAttr('target', vmin=0, vmax=1000),# your ranges
+#     MeshCoarsening(
+#         num_scales=4,
+#         max_indegree=None,
+#         #rel_pos_scaling=[0.015, 0.03, 0.06, 0.12],
+#         scalar_rel_pos=True,
+#     ),
+# ])
 
 # Diffusion process
 diffusion_process = DiffusionProcess(
@@ -97,14 +157,14 @@ diffusion_process = DiffusionProcess(
 
 # Model
 arch = {
-    'in_node_features':   1,
-    'cond_node_features': 2,
+    'in_node_features':   3,
+    'cond_node_features': 0,
     'cond_edge_features': 3,
-    'depths':             [2,2,2,2],
+    'depths':             [3,3,3,3],
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
-    'dim':                  2
+    'dim':                  3
 }
 net = DiffusionGraphNet(
     diffusion_process  = diffusion_process,
@@ -128,22 +188,20 @@ lit = LitDiffusionCFD(
     pack_win_len=1,            # <— use these names
     pack_stride=1,
     pack_select="random",
-    y_idx=[0],
-    cond_idx=[1,2],
+    y_idx=[1,2,3],
+    cond_idx=None,
 )
 
 
 # DataModule from your CFDDataset
 dm = cfd_datamodule(metadata_files, train_val_split=0.8)
-dm.setup(stage='fit')
+#dm.setup(stage='fit')
 # Get the combined loader
-combined_loader = dm.train_dataloader()
-cfd_datamodule_train  = dm.train_cfd_datamodule
-print(f"Number of subdatasets: {len(cfd_datamodule_train.subdatasets)}")
-for i, subdataset in enumerate(cfd_datamodule_train.subdatasets):
-        print(f"Subdataset {i+1} batch size: {dm.batch_sizes[i]}")
-
-from torch_geometric.data import Data, Batch
+# combined_loader = dm.train_dataloader()
+# cfd_datamodule_train  = dm.train_cfd_datamodule
+# print(f"Number of subdatasets: {len(cfd_datamodule_train.subdatasets)}")
+# for i, subdataset in enumerate(cfd_datamodule_train.subdatasets):
+#         print(f"Subdataset {i+1} batch size: {dm.batch_sizes[i]}")
 
 def get_sequence_from_combined(item):
     # item may be: (batches, batch_idx, dataloader_idx) OR just `batches`
@@ -194,8 +252,24 @@ def print_batch_info(sequence):
 
 
 # Trainer
-prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow", progress_bar="green1", progress_bar_finished="green1", progress_bar_pulse="#6206E0", batch_progress="green_yellow", time="grey82", processing_speed="grey82", metrics="grey82", metrics_text_delimiter="\n", metrics_format=".3e"))
-ckpt = ModelCheckpoint(dirpath="checkpoints", filename="diffusion-{epoch}", monitor="val/loss", mode="min", save_top_k=3)
+prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow", 
+                                                      progress_bar="green1", 
+                                                      progress_bar_finished="green1", 
+                                                      progress_bar_pulse="#6206E0", 
+                                                      batch_progress="green_yellow", 
+                                                      time="grey82", 
+                                                      processing_speed="grey82", 
+                                                      metrics="grey82", 
+                                                      metrics_text_delimiter="\n", 
+                                                      metrics_format=".3e"))
+
+ckpt = ModelCheckpoint(dirpath="checkpoints", 
+                       filename="diffusion-{epoch}", 
+                       monitor="val/loss", 
+                       mode="min", 
+                       save_top_k=3,
+                       save_last=True)
+
 trainer = L.Trainer(max_epochs=2, 
                     accelerator="auto", 
                     precision="16-mixed", 

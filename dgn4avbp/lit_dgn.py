@@ -301,7 +301,7 @@ class LitDiffusionCFD(L.LightningModule):
                     add_time=self.include_time_in_cond,
                 )
 
-        inspect(graph, "graph (prepared)")
+        #inspect(graph, "graph (prepared)")
         return graph
 
     # ---------------------

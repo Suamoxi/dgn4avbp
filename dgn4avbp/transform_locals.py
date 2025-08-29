@@ -496,3 +496,19 @@ class ComputeNormals:
         if self.del_cell_list:
             delattr(graph, 'cell_list')
         return graph
+
+class ZScoreTarget:
+    """
+    Normalize graph.target channel-wise: (x - mean) / std.
+    mean, std: 1D tensors or lists with length = target channels.
+    """
+    def __init__(self, mean, std):
+        mean = torch.as_tensor(mean, dtype=torch.float32)
+        std  = torch.as_tensor(std,  dtype=torch.float32).clamp_min(1e-12)
+        self.mean = mean.view(1, -1)
+        self.std  = std.view(1, -1)
+
+    def __call__(self, g):
+        if hasattr(g, 'target') and g.target is not None:
+            g.target = (g.target - self.mean.to(g.target.device)) / self.std.to(g.target.device)
+        return g

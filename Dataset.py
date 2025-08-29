@@ -10,10 +10,6 @@ import torch
 from torchvision import transforms as T
 
 from torch.utils.data import DataLoader as TorchDataLoader
-import torch
-# in Dataset.py
-from dgn4avbp.loader import Collater  # your custom collater
-from torch_geometric.data import Batch
 
 class CFDSubDataset(IterableDataset):
     def __init__(self, metadata_file, start_idx, shuffle=False, split=1.0, flag: str = 'train'):
@@ -100,7 +96,8 @@ class CFDDataset:
         common_kwargs = {
             'batch_size': batch_size,
             'collate_fn': self._sequence_collate,   # <-- uses Collater(transform=...)
-            'num_workers': 0,
+            'num_workers': 1,
+            'prefetch_factor': 1
             # DO NOT put 'shuffle' here for IterableDataset
         }
 
@@ -139,3 +136,30 @@ def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx,
     return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx,
                       shuffle, split, flag, nodes_per_sample,
                       collater_transform=collater_transform)
+
+
+@torch.no_grad()
+def estimate_mesh_scales(pos, edge_index, quantile=0.5):
+    row, col = edge_index
+    edge_len = (pos[col] - pos[row]).norm(dim=1)
+    h = edge_len.quantile(quantile).item()  # median edge length
+    rel_pos_scaling = [h, 2*h, 4*h, 8*h]
+    return h, rel_pos_scaling
+
+def _sample_graphs_for_stats(meta, K=4):
+    pos0, edge_index0, cells0 = load_coo_data(
+        meta['coo_file'], meta['mesh_file'], meta['coordinate_paths']
+    )
+    file_list, it_list_total = create_data_list(
+        [meta['solution_directory']],
+        meta['seq_len'],
+        meta['solution_prefix']
+    )
+    K = min(K, len(it_list_total))
+    samples = []
+    for k in range(K):
+        case, sim, t = it_list_total[k][0]        # take the first step of each sequence
+        fpath = file_list[str(case)][str(t)]
+        g = create_graph_data(pos0, edge_index0, fpath, meta, cells0)
+        samples.append(g)
+    return samples, pos0, edge_index0

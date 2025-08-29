@@ -78,6 +78,7 @@ def convert_element_to_coo(f):
                                                                               (max(row)+1).astype(np.int32)))
     edges = edges.tocsr()
     edges[edges.nonzero()] = 1
+    assert (row >= 0).all() and (col >= 0).all(), "Negative indices in COO!"
     return edges.tocoo(), cells
 
 def save_edges_to_hdf5(coo_matrix, node_positions, cells, filename='edges.h5'):
@@ -133,6 +134,7 @@ def load_coo_data(coo_file, mesh_file, coordinate_paths):
         cells = f['cells'][:]
         data = f['data'][:]
         shape = f.attrs['shape']
+        assert (row >= 0).all() and (col >= 0).all(), "Negative indices in COO!"
     return torch.tensor(node_positions, dtype=torch.float), torch.tensor((row, col), dtype=torch.long), cells
 
 # Load simulation data on demand
@@ -231,7 +233,12 @@ def create_graph_data(node_positions, edge_indices, simulation_file, metadata, c
         cells = cells,            # List of cell nodes
         edge_attr = node_positions[edge_indices[1]] - node_positions[edge_indices[0]] #Edge attributes
     )
-
+    ei = graph_data.edge_index
+    assert ei.min() >= 0, "edge_index has negative values"
+    assert ei.max() < graph_data.num_nodes, "edge_index exceeds num_nodes"
+    row, col = ei
+    deg = torch.bincount(col, minlength=graph_data.num_nodes)
+    #assert (deg > 0).all(), "Found isolated nodes"
 
     # def inspect_target_brief(graph, names=None, nrows=5):
     #     t = graph.target
