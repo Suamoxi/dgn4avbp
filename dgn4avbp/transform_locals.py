@@ -347,7 +347,7 @@ class MeshCoarsening:
         scalar_rel_pos:  bool              = False,
     ) -> None:
         if rel_pos_scaling is None:
-            rel_pos_scaling = [None] * (num_scales - 1)
+            rel_pos_scaling = [None] * num_scales 
         assert num_scales > 1, f'Expected num_scales to be greater than 1, got {num_scales}'
         assert max_indegree is None or max_indegree > 0, f'Expected max_indegree to be greater than 0, got {max_indegree}'
         assert len(rel_pos_scaling) == num_scales, f'Expected scale_edge_attr to have length {num_scales}, got {len(rel_pos_scaling)}'

@@ -70,7 +70,7 @@ class cfd_datamodule(L.LightningDataModule):
         tgt = torch.cat([g.target for g in samples], dim=0)  # shape (N_total, 3)
         self._zscore_mean = tgt.mean(0)                      # (3,)
         self._zscore_std  = tgt.std(0)                       # (3,)
-
+        print(self._zscore_mean,self._zscore_std)
         # mesh scales for edge normalization & LR scaling
         self._h, self._rel_pos_scales = _estimate_mesh_scales(pos0, edge_index0)
 
@@ -164,7 +164,8 @@ arch = {
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
-    'dim':                  3
+    'dim':                  3,
+    "scalar_rel_pos":   False
 }
 net = DiffusionGraphNet(
     diffusion_process  = diffusion_process,
