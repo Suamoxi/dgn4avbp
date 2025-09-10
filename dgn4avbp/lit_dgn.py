@@ -391,3 +391,115 @@ class LitDiffusionCFD(L.LightningModule):
                 total += float(g.norm(2).item() ** 2)
         grad_norm = total ** 0.5
         self.log("train/grad_norm", grad_norm, on_step=True, prog_bar=False)
+
+        # ---- Add these two methods inside LitDiffusionCFD ----
+    @torch.no_grad()
+    def sample_from_noise(self, graph: Batch, T: int | None = None) -> torch.Tensor:
+        """
+        DDPM-style reverse sampling. Returns the final denoised field (normalized space).
+        graph.target must exist to infer output dimensionality (y_dim); it is NOT used as GT.
+        """
+        device = self.device
+        dp = self.dp
+        T = dp.num_steps if T is None else T
+
+        graph = graph.to(device)
+
+        # If latent diffusion is enabled, move to latent space first
+        latent_mode = getattr(self.net, "is_latent_diffusion", False)
+        if latent_mode:
+            # expect self.net.autoencoder.transform(graph) to attach `x_latent_target` etc.
+            graph = self.net.autoencoder.transform(graph)
+            y_dim = graph.x_latent_target.shape[1]
+        else:
+            y_dim = graph.target.shape[1]
+
+        # number of graphs in batch
+        B = int(graph.batch.max().item() + 1)
+
+        # Initialize x_T ~ N(0, I) in the right space
+        if latent_mode:
+            x_t = torch.randn_like(graph.x_latent_target, device=device)
+        else:
+            x_t = torch.randn(graph.num_nodes, y_dim, device=device)
+
+        # Helper to expand per-graph scalars to per-node [N,1]
+        def per_node(values_1d, r_vec):
+            # values_1d: tensor [num_steps], r_vec: [B]
+            return dp.get_index_from_list(values_1d, graph.batch, r_vec)  # -> [N,1]
+
+        # For masking "no noise at t=0"
+        nodes_per_graph = torch.bincount(graph.batch)
+
+        for t in reversed(range(T)):
+            r_vec = torch.full((B,), t, device=device, dtype=torch.long)  # [B]
+
+            # Model input at step t
+            graph.field_r = x_t
+            graph.r = r_vec
+
+            # Predict epsilon_t (same as training target)
+            eps_t = self.net(graph)
+
+            # --- UNWRAP MODEL OUTPUT ---
+            if isinstance(eps_t, (list, tuple)):
+                eps_t = eps_t[0]                      # take the noise prediction
+            elif isinstance(eps_t, dict):
+                # try common keys; fallback to the first value
+                eps_t = eps_t.get("eps", eps_t.get("pred", next(iter(eps_t.values()))))
+
+            # safety checks
+            if not torch.is_tensor(eps_t):
+                raise TypeError(f"Model must return a tensor for epsilon; got {type(eps_t)}")
+            eps_t = eps_t.to(x_t.dtype)
+
+
+            # Coefficients for this step (node-wise broadcast)
+            sqrt_recip_alpha_t        = per_node(dp.sqrt_recip_alphas,                 r_vec)   # [N,1]
+            beta_t                    = per_node(dp.betas,                              r_vec)   # [N,1]
+            sqrt_one_minus_abar_t     = per_node(dp.sqrt_one_minus_alphas_cumprod,     r_vec)   # [N,1]
+            posterior_variance_t      = per_node(dp.posterior_variance,                r_vec)   # [N,1]
+
+            # DDPM (Ho et al.) mean:
+            # x_{t-1} mean = 1/sqrt(alpha_t) * (x_t - beta_t/sqrt(1-abar_t) * eps_t)
+            model_mean = sqrt_recip_alpha_t * (x_t - (beta_t / (sqrt_one_minus_abar_t + 1e-12)) * eps_t)
+
+            if t > 0:
+                # Add noise with sigma_t = sqrt(posterior_variance_t)
+                noise = torch.randn_like(x_t)
+                # expand per-graph (t>0) mask to nodes:
+                add_noise_graph = (r_vec > 0).float()
+                add_noise_nodes = add_noise_graph.repeat_interleave(nodes_per_graph).unsqueeze(-1)
+                x_t = model_mean + torch.sqrt(posterior_variance_t).clamp_min(0.0) * noise * add_noise_nodes
+            else:
+                x_t = model_mean
+
+            # (Optional) enforce Dirichlet boundary values if you carry a mask + known values.
+            # if hasattr(graph, "dirichlet_mask") and hasattr(graph, "dirichlet_value"):
+            #     m = graph.dirichlet_mask.bool()
+            #     x_t[m] = graph.dirichlet_value[m]
+
+        # Decode if latent
+        if latent_mode:
+            graph.x_latent_pred = x_t
+            x_t = self.net.autoencoder.inverse_transform(graph)  # should yield node-space field
+
+        return x_t  # normalized space (Z-scored if you trained with ZScoreTarget)
+
+    def predict_step(self, batch, batch_idx: int, dataloader_idx: int = 0):
+        """
+        Lightning-native inference: returns a dict with normalized prediction.
+        Denormalize outside using your DataModule stats (mean/std).
+        """
+        streams = self._as_streams(batch)     # handle List[...] or Dict[str, List[...]]
+        outs = []
+        for seq in streams:
+            g = self._prepare_graph(seq)      # pack window / split y & cond per your config
+            y_hat_norm = self.sample_from_noise(g)   # [N, y_dim] in normalized space
+            outs.append({
+                "pred_norm": y_hat_norm.detach().cpu(),
+                "pos": g.pos.detach().cpu(),
+                "batch": g.batch.detach().cpu(),
+            })
+        # If you use CombinedLoader with one stream, return the single dict; else list
+        return outs[0] if len(outs) == 1 else outs
