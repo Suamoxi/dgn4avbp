@@ -1,0 +1,51 @@
+
+=========
+== PyG ==
+=========
+
+NVIDIA Release 25.03 (build 151628294)
+PyG Version 2.7.0
+Container image Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Copyright 2018-2024 PyG Contributors.  All rights reserved.
+Copyright (c) 2014-2024 Facebook Inc.
+Copyright (c) 2011-2014 Idiap Research Institute (Ronan Collobert)
+Copyright (c) 2012-2014 Deepmind Technologies    (Koray Kavukcuoglu)
+Copyright (c) 2011-2012 NEC Laboratories America (Koray Kavukcuoglu)
+Copyright (c) 2011-2013 NYU                      (Clement Farabet)
+Copyright (c) 2006-2010 NEC Laboratories America (Ronan Collobert, Leon Bottou, Iain Melvin, Jason Weston)
+Copyright (c) 2006      Idiap Research Institute (Samy Bengio)
+Copyright (c) 2001-2004 Idiap Research Institute (Ronan Collobert, Samy Bengio, Johnny Mariethoz)
+Copyright (c) 2015      Google Inc.
+Copyright (c) 2015      Yangqing Jia
+Copyright (c) 2013-2016 The Caffe contributors
+All rights reserved.
+
+Various files include modifications (c) NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+
+GOVERNING TERMS: The software and materials are governed by the NVIDIA Software License Agreement
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement/)
+and the Product-Specific Terms for NVIDIA AI Products
+(found at https://www.nvidia.com/en-us/agreements/enterprise-software/product-specific-terms-for-ai-products/).
+
+tensor([-0.0513, -0.0775, -0.0213]) tensor([19.7216, 20.0282, 19.5481])
+┏━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┓
+┃   ┃ Name      ┃ Type              ┃ Params ┃ Mode  ┃
+┡━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━┩
+│ 0 │ net       │ DiffusionGraphNet │  596 K │ train │
+│ 1 │ criterion │ HybridLoss        │      0 │ train │
+└───┴───────────┴───────────────────┴────────┴───────┘
+Trainable params: 596 K                                                         
+Non-trainable params: 0                                                         
+Total params: 596 K                                                             
+Total estimated model params size (MB): 2                                       
+Modules in train mode: 53                                                       
+Modules in eval mode: 0                                                         
+
+|------------------------------------------------------------------------------------------|
+|                 Job Energy and emissions summary                                         |
+|------------------------------------------------------------------------------------------|
+Job Energy (J) :                    0                                
+Job Energy (kWh) :                  0.000                            
+Job emissions (gCO₂eq) :               0                                
+Job emissions are computed with the average carbon intensity value during timespan of the job (17.89 gCO₂eq/kWh)
+|------------------------------------------------------------------------------------------|

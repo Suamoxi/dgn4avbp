@@ -485,21 +485,22 @@ class LitDiffusionCFD(L.LightningModule):
             x_t = self.net.autoencoder.inverse_transform(graph)  # should yield node-space field
 
         return x_t  # normalized space (Z-scored if you trained with ZScoreTarget)
+    
+    # def on_validation_step_end(self):
+    #     self.log()
 
     def predict_step(self, batch, batch_idx: int, dataloader_idx: int = 0):
-        """
-        Lightning-native inference: returns a dict with normalized prediction.
-        Denormalize outside using your DataModule stats (mean/std).
-        """
-        streams = self._as_streams(batch)     # handle List[...] or Dict[str, List[...]]
+        streams = self._as_streams(batch)
         outs = []
         for seq in streams:
-            g = self._prepare_graph(seq)      # pack window / split y & cond per your config
-            y_hat_norm = self.sample_from_noise(g)   # [N, y_dim] in normalized space
+            g = self._prepare_graph(seq)
+            # choose your sampler
+            y_hat_norm = self.sample_from_noise(g)  # or sample_from_noise(...)
             outs.append({
                 "pred_norm": y_hat_norm.detach().cpu(),
                 "pos": g.pos.detach().cpu(),
                 "batch": g.batch.detach().cpu(),
+                "gt_norm": g.target.detach().cpu(),   # <— add this
+                "y_idx": (self.y_idx if self.y_idx is not None else list(range(self.y_cols))),
             })
-        # If you use CombinedLoader with one stream, return the single dict; else list
         return outs[0] if len(outs) == 1 else outs

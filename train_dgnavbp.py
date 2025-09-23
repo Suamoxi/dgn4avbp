@@ -134,18 +134,18 @@ metadata_files = [
         os.path.join('/scratch/coop/theret/cfd-dataset/tutorial/sample_dataset/metadata.yaml')
    ]
 
-graph_transform = T.Compose([
-    EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
-    ScaleEdgeAttr(0.015),                   # like DGN4CFD
-    #EdgeCondFreeStreamLocalAxes([...]),     # optional: your edge_cond
-    ScaleAttr('target', vmin=0, vmax=1000),# your ranges
-    MeshCoarsening(
-        num_scales=4,
-        max_indegree=None,
-        #rel_pos_scaling=[0.015, 0.03, 0.06, 0.12],
-        scalar_rel_pos=True,
-    ),
-])
+# graph_transform = T.Compose([
+#     EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
+#     ScaleEdgeAttr(0.015),                   # like DGN4CFD
+#     #EdgeCondFreeStreamLocalAxes([...]),     # optional: your edge_cond
+#     ScaleAttr('target', vmin=0, vmax=1000),# your ranges
+#     MeshCoarsening(
+#         num_scales=4,
+#         max_indegree=None,
+#         #rel_pos_scaling=[0.015, 0.03, 0.06, 0.12],
+#         scalar_rel_pos=True,
+#     ),
+# ])
 
 # Diffusion process
 diffusion_process = DiffusionProcess(
@@ -158,7 +158,7 @@ arch = {
     'in_node_features':   3,
     'cond_node_features': 0,
     'cond_edge_features': 3,
-    'depths':             [3,3,3,3],
+    'depths':             [2],
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
@@ -261,13 +261,13 @@ prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow"
                                                       metrics_format=".3e"))
 
 ckpt = ModelCheckpoint(dirpath="checkpoints", 
-                       filename="diffusion-{epoch}", 
+                       filename="diffusion-noMuGNN-{epoch}", 
                        monitor="val/loss", 
                        mode="min", 
                        save_top_k=3,
                        save_last=True)
 
-trainer = L.Trainer(max_epochs=30, 
+trainer = L.Trainer(max_epochs=200, 
                     accelerator="auto", 
                     precision="16-mixed", 
                     callbacks=[ckpt, prog_bar], 
@@ -278,7 +278,9 @@ trainer = L.Trainer(max_epochs=30,
 
 # Train
 # after you construct `trainer`, `lit`, and `dm`:
-ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last.ckpt"  # or a specific epoch file like "checkpoints/diffusion-epoch=1.ckpt"
+ckpt_path = None
+ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last-v1.ckpt"  # or a specific epoch file like "checkpoints/diffusion-epoch=1.ckpt"
+
 if ckpt_path is None:
     trainer.fit(lit, dm) 
 else:
@@ -296,7 +298,7 @@ else:
 #     pack_win_len=1,
 #     pack_stride=1,
 #     pack_select="random",
-#     y_idx=[1,2,3],
+#     y_idx=[0,1,2],
 #     cond_idx=None,
 # )
 

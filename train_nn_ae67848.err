@@ -1,0 +1,13 @@
+/gpfs-calypso/home/coop/theret/.bashrc: line 32: cds: command not found
+Using 16bit Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+/scratch/coop/theret/nn4avbp/utils.py:138: UserWarning: Creating a tensor from a list of numpy.ndarrays is extremely slow. Please consider converting the list to a single numpy.ndarray with numpy.array() before converting to a tensor. (Triggered internally at /opt/pytorch/pytorch/torch/csrc/utils/tensor_new.cpp:254.)
+  return torch.tensor(node_positions, dtype=torch.float), torch.tensor((row, col), dtype=torch.long), cells
+/scratch/coop/theret/avbpML_env/lib/python3.12/site-packages/lightning/pytorch/callbacks/model_checkpoint.py:701: Checkpoint directory /scratch/coop/theret/nn4avbp/checkpoints exists and is not empty.
+Restoring states from the checkpoint path at /scratch/coop/theret/nn4avbp/checkpoints/last-v1.ckpt
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+/scratch/coop/theret/avbpML_env/lib/python3.12/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py:231: Precision 16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+Restored all states from the checkpoint at /scratch/coop/theret/nn4avbp/checkpoints/last-v1.ckpt
+slurmstepd: error: *** JOB 67848 ON calypso-grace01 CANCELLED AT 2025-09-23T16:14:48 ***
