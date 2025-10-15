@@ -1,0 +1,14 @@
+# Large / generated data
+lightning_logs/
+checkpoints/
+.ipynb_checkpoints/
+*.vtk
+*.h5
+*.npz
+# IDE + OS junk
+__pycache__/
+*.log
+.DS_Store
+*.err
+*.out
+*.sh

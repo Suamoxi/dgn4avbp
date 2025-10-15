@@ -17,7 +17,47 @@ from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr, Mesh
 from torchvision import transforms as T
 import torch
 
-def _sample_graphs_for_stats(meta, K=4):
+
+def get_sequence_from_combined(item):
+    # item may be: (batches, batch_idx, dataloader_idx) OR just `batches`
+    if isinstance(item, tuple) and len(item) == 3:
+        batches, _batch_idx, _dl_idx = item
+    else:
+        batches = item
+
+    # If CombinedLoader was built as {"main": loader}
+    if isinstance(batches, dict):
+        sequence = next(iter(batches.values()))
+    else:
+        sequence = batches
+
+    # Some wrappers yield a tuple rather than list — treat them the same.
+    if isinstance(sequence, tuple):
+        sequence = list(sequence)
+    return sequence  # list[Batch]
+
+def print_batch_info(sequence):
+    assert isinstance(sequence, (list, tuple)), f"Expected list/tuple, got {type(sequence)}"
+    print(f"    Number of time steps in batch: {len(sequence)}")
+    for t, g in enumerate(sequence):
+        # If someone tucked the Batch inside {"main": Batch} per time-step:
+        if isinstance(g, dict) and "main" in g:
+            g = g["main"]
+        assert isinstance(g, (Batch, Data)), f"Time step {t} is {type(g)}"
+        print(f"    Time step {t+1}:")
+        print(f"        Number of graphs in batch: {g.num_graphs}")
+        print(f"        Total number of nodes: {g.num_nodes}")
+        print(f"        Total number of edges: {g.num_edges}")
+        if hasattr(g, 'target'):
+            print(f"        target shape: {tuple(g.target.shape)}")
+        if hasattr(g, 'edge_attr'):
+            print(f"        edge_attr shape: {tuple(g.edge_attr.shape)}")
+        if hasattr(g, 'cells') and isinstance(g.cells, list) and g.cells and g.cells[0] is not None:
+            print(f"        Total number of cells: {len(g.cells[0])}")
+        if hasattr(g, 'time'):
+            print(f"        time mean per-graph: {g.time.view(g.num_graphs, -1).mean(dim=-1)}")
+
+def _sample_graphs_for_stats(meta, K=200):
     pos0, edge_index0, cells0 = load_coo_data(
         meta['coo_file'], meta['mesh_file'], meta['coordinate_paths']
     )
@@ -88,7 +128,7 @@ class cfd_datamodule(L.LightningDataModule):
     def setup(self, stage: str):
         # --- compute stats ONCE from the first dataset (or loop over all and concat) ---
         meta0 = read_metadata(self.metadata_files[0])
-        samples, pos0, edge_index0 = _sample_graphs_for_stats(meta0, K=4)
+        samples, pos0, edge_index0 = _sample_graphs_for_stats(meta0, K=200)
 
         # target mean/std (your target has 3 velocity components)
         tgt = torch.cat([g.target for g in samples], dim=0)  # shape (N_total, 3)
@@ -101,10 +141,10 @@ class cfd_datamodule(L.LightningDataModule):
         # --- build the graph transform pipe (reused for train/val/test) ---
         self.graph_transform = T.Compose([
             EnsureEdgeAttrFromPos(),         # edge_attr = pos[j]-pos[i]
-            ScaleEdgeAttr(self._h),          # NOTE: this multiplies the vectors by h; use 1/h to make them dimensionless
+            ScaleEdgeAttr(1/self._h),          # normalize HR edge vectors by median spacing
             ZScoreTarget(self._zscore_mean, self._zscore_std),  # normalize targets
             MeshCoarsening(
-                num_scales=4,
+                num_scales=5,
                 max_indegree=None,           # set later for unstructured meshes
                 rel_pos_scaling=None,
                 scalar_rel_pos=False,         # keep 3D vectors for LR edges
@@ -156,10 +196,10 @@ class cfd_datamodule(L.LightningDataModule):
 
 
 
-metadata_files = [
+metadata_files_fernando = [
         os.path.join('/scratch/coop/theret/cfd-dataset/tutorial/sample_dataset/metadata.yaml')
    ]
-
+metadata_files = [os.path.join('/scratch/coop/theret/HIT_LES_FORCED/metadata.yaml')]
 # graph_transform = T.Compose([
 #     EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
 #     ScaleEdgeAttr(0.015),                   # like DGN4CFD
@@ -184,7 +224,7 @@ arch = {
     'in_node_features':   3,
     'cond_node_features': 0,
     'cond_edge_features': 3,
-    'depths':             [2],
+    'depths':             [3,3,3,3,3],
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
@@ -208,11 +248,11 @@ lit = LitDiffusionCFD(
     criterion=criterion,
     step_sampler_factory=step_sampler_factory,
     lr=1e-4,
-    scheduler_cfg={"factor":0.1, "patience":50},
-    pack_mode="y_window_cond_static",
-    pack_win_len=1,            # <— use these names
+    scheduler_cfg={"factor":0.1, "patience":250},
+    pack_mode=None,
+    pack_win_len=10,            # <— use these names
     pack_stride=1,
-    pack_select="random",
+    pack_select="last",
     y_idx=[0,1,2],
     cond_idx=None,
 )
@@ -220,7 +260,7 @@ lit = LitDiffusionCFD(
 
 # DataModule from your CFDDataset
 dm = cfd_datamodule(metadata_files, train_val_split=0.8)
-#dm.setup(stage='fit')
+dm.setup(stage='fit')
 # Get the combined loader
 # combined_loader = dm.train_dataloader()
 # cfd_datamodule_train  = dm.train_cfd_datamodule
@@ -228,44 +268,30 @@ dm = cfd_datamodule(metadata_files, train_val_split=0.8)
 # for i, subdataset in enumerate(cfd_datamodule_train.subdatasets):
 #         print(f"Subdataset {i+1} batch size: {dm.batch_sizes[i]}")
 
-def get_sequence_from_combined(item):
-    # item may be: (batches, batch_idx, dataloader_idx) OR just `batches`
-    if isinstance(item, tuple) and len(item) == 3:
-        batches, _batch_idx, _dl_idx = item
-    else:
-        batches = item
+dl = dm.train_dataloader()
+item = next(iter(dl))
 
-    # If CombinedLoader was built as {"main": loader}
-    if isinstance(batches, dict):
-        sequence = next(iter(batches.values()))
-    else:
-        sequence = batches
+sequence = get_sequence_from_combined(item)  # list of length seq_len
+g = sequence[-1]  # last timestep PyG Batch
 
-    # Some wrappers yield a tuple rather than list — treat them the same.
-    if isinstance(sequence, tuple):
-        sequence = list(sequence)
-    return sequence  # list[Batch]
+print("seq_len:", len(sequence))
+print("num_graphs:", g.num_graphs)
+print("num_nodes:", g.num_nodes)
+print("target shape:", tuple(g.target.shape))
+print("edge_attr shape:", tuple(g.edge_attr.shape) if hasattr(g,"edge_attr") else None)
 
-def print_batch_info(sequence):
-    assert isinstance(sequence, (list, tuple)), f"Expected list/tuple, got {type(sequence)}"
-    print(f"    Number of time steps in batch: {len(sequence)}")
-    for t, g in enumerate(sequence):
-        # If someone tucked the Batch inside {"main": Batch} per time-step:
-        if isinstance(g, dict) and "main" in g:
-            g = g["main"]
-        assert isinstance(g, (Batch, Data)), f"Time step {t} is {type(g)}"
-        print(f"    Time step {t+1}:")
-        print(f"        Number of graphs in batch: {g.num_graphs}")
-        print(f"        Total number of nodes: {g.num_nodes}")
-        print(f"        Total number of edges: {g.num_edges}")
-        if hasattr(g, 'target'):
-            print(f"        target shape: {tuple(g.target.shape)}")
-        if hasattr(g, 'edge_attr'):
-            print(f"        edge_attr shape: {tuple(g.edge_attr.shape)}")
-        if hasattr(g, 'cells') and isinstance(g.cells, list) and g.cells and g.cells[0] is not None:
-            print(f"        Total number of cells: {len(g.cells[0])}")
-        if hasattr(g, 'time'):
-            print(f"        time mean per-graph: {g.time.view(g.num_graphs, -1).mean(dim=-1)}")
+
+# cl = dm.train_dataloader()
+
+# # 1) Inspect children of the CombinedLoader
+# subs = getattr(cl, "loaders", None)  # dict or list
+# if isinstance(subs, dict):
+#     for k, v in subs.items():
+#         has_len = hasattr(v, "__len__")
+#         print(k, type(v), "has_len?", has_len, ("len:", len(v)) if has_len else "")
+# else:
+#     print("single loader:", type(cl), "has_len?", hasattr(cl, "__len__"), (len(cl) if hasattr(cl, "__len__") else ""))
+
 
 # # Iterate safely
 # for i, item in enumerate(combined_loader):
@@ -287,30 +313,35 @@ prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow"
                                                       metrics_format=".3e"))
 
 ckpt = ModelCheckpoint(dirpath="checkpoints", 
-                       filename="diffusion-noMuGNN-{epoch}", 
+                       filename="diffusion-MuGNN-lowresHIT-{epoch}", 
                        monitor="val/loss", 
                        mode="min", 
                        save_top_k=3,
                        save_last=True)
 
-trainer = L.Trainer(max_epochs=200, 
+trainer = L.Trainer(max_epochs=5000, 
                     accelerator="auto", 
                     precision="16-mixed", 
                     callbacks=[ckpt, prog_bar], 
-                    log_every_n_steps=10, 
-                    limit_val_batches=20, 
-                    limit_train_batches=80,
-                    accumulate_grad_batches=64)
+                    log_every_n_steps=1, 
+                    limit_val_batches=40, 
+                    limit_train_batches=160,
+                    accumulate_grad_batches=4,
+                    gradient_clip_val=1.0
+                    )
 
 # Train
 # after you construct `trainer`, `lit`, and `dm`:
 ckpt_path = None
-ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last-v1.ckpt"  # or a specific epoch file like "checkpoints/diffusion-epoch=1.ckpt"
+ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last-v6.ckpt"  # or a specific epoch file like "checkpoints/diffusion-epoch=1.ckpt"
+
+
 
 if ckpt_path is None:
     trainer.fit(lit, dm) 
 else:
     trainer.fit(lit, dm, ckpt_path=ckpt_path)
+    
 
 # # 1) Rebuild lit exactly as for training
 # lit = LitDiffusionCFD(
