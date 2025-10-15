@@ -36,10 +36,36 @@ def _sample_graphs_for_stats(meta, K=4):
     return samples, pos0, edge_index0
 
 def _estimate_mesh_scales(pos, edge_index, quantile=0.5):
+    """Estimate characteristic mesh spacings from the graph connectivity.
+
+    The function measures the Euclidean length of every edge in the base mesh,
+    then selects the requested quantile (median by default) as the reference
+    spacing ``h``.  The resulting value is representative of the typical
+    distance between neighbouring mesh vertices and is later used to
+    normalise edge-relative position vectors.  We also precompute a list of
+    successively coarser spacings used by the multiresolution coarsening
+    transform.
+
+    Args:
+        pos (torch.Tensor): Vertex positions of shape ``[num_nodes, 3]``.
+        edge_index (torch.Tensor): Directed COO graph edges of shape
+            ``[2, num_edges]``.
+        quantile (float, optional): Quantile of the edge-length distribution
+            to use as the characteristic spacing.  Defaults to the median.
+
+    Returns:
+        Tuple[float, List[float]]: The characteristic spacing ``h`` and a list
+        of per-level spacings ``[h, 2h, 4h, 8h]`` that match the resolution of
+        the coarsened meshes.
+    """
+
     row, col = edge_index
+    # Compute all undirected edge lengths; ``edge_index`` stores both
+    # directions so each physical edge is measured twice, which is acceptable
+    # for the quantile computation.
     edge_len = (pos[col] - pos[row]).norm(dim=1)
     h = edge_len.quantile(quantile).item()
-    rel_pos_scaling = [h, 2*h, 4*h, 8*h]
+    rel_pos_scaling = [h, 2 * h, 4 * h, 8 * h]
     return h, rel_pos_scaling
 
 class cfd_datamodule(L.LightningDataModule):
@@ -75,7 +101,7 @@ class cfd_datamodule(L.LightningDataModule):
         # --- build the graph transform pipe (reused for train/val/test) ---
         self.graph_transform = T.Compose([
             EnsureEdgeAttrFromPos(),         # edge_attr = pos[j]-pos[i]
-            ScaleEdgeAttr(self._h),          # normalize HR edge vectors by median spacing
+            ScaleEdgeAttr(self._h),          # NOTE: this multiplies the vectors by h; use 1/h to make them dimensionless
             ZScoreTarget(self._zscore_mean, self._zscore_std),  # normalize targets
             MeshCoarsening(
                 num_scales=4,
