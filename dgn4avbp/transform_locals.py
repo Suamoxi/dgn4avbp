@@ -197,15 +197,52 @@ def guillard_coarsening(
     edge_index: torch.Tensor,
     max_iter:   int = 5,
 ) -> tuple[torch.BoolTensor, torch.LongTensor]:
-    """Performs the Guillard coarsening algorithm and clustering to create a LR graph and a mapping from HR (child nodes) to LR (parent) indices.
+    """Group fine nodes around coarse representatives using Guillard's rule.
+
+    The routine follows the node-nested algorithm described by Guillard for
+    unstructured meshes.  It proceeds in three conceptual phases:
+
+    1. **Initial coarse selection.**  Starting from all nodes marked as
+       ``coarse``, we iterate through the vertices and demote every in-neighbour
+       of a coarse node to *fine* status.  This greedy pass guarantees that no
+       two coarse nodes are directly connected by an edge, keeping them
+       well-separated in the mesh.
+    2. **Assign each fine node to a coarse parent.**  For every fine node we
+       inspect its incoming neighbours, compute Euclidean distances to those
+       that remained coarse, and pick the closest one as the parent.  Nodes that
+       only see other fine vertices temporarily receive ``-1`` as a placeholder.
+    3. **Propagate parent assignments.**  Whenever a fine node is still
+       unassigned, we look at its neighbours that already found a parent and
+       inherit the parent's parent.  The loop repeats until all nodes point to a
+       valid coarse ancestor or until ``max_iter`` is exceeded.
+
+    The function returns both the boolean ``coarse_mask`` (``True`` entries are
+    kept at the coarse level) and ``idxHR_to_idxLR``, an index vector such that
+    ``idxHR_to_idxLR[i]`` gives the location of node ``i`` in the coarser mesh.
+
+    Example:
+        Consider a 1-D chain of four nodes with bidirectional edges::
+
+            0 <-> 1 <-> 2 <-> 3
+
+        After the greedy pass, nodes ``0`` and ``2`` stay coarse while ``1`` and
+        ``3`` become fine.  The second phase assigns parent ``0`` to node ``1``
+        (the closest coarse neighbour) and parent ``2`` to node ``3``.  The
+        returned tensors are ``coarse_mask = [True, False, True, False]`` and
+        ``idxHR_to_idxLR = [0, 0, 1, 1]``, meaning that the coarse mesh contains
+        the original nodes ``0`` and ``2`` and every fine node points to its
+        nearest coarse representative.
 
     Args:
-        pos (torch.Tensor): Node position tensor. Shape (num_nodes, dim).
-        edge_index (torch.Tensor): Edge index tensor. Shape (2, num_edges).
-        max_iter (int, optional): Maximum number of iterations. Defaults to 5.
+        pos (torch.Tensor): Node position tensor. Shape ``(num_nodes, dim)``.
+        edge_index (torch.Tensor): Edge index tensor. Shape ``(2, num_edges)``.
+        max_iter (int, optional): Maximum number of propagation iterations before
+            declaring failure. Defaults to ``5``.
 
     Returns:
-        tuple[torch.BoolTensor, torch.LongTensor]: Coarse mask and mapping from HR (child nodes) to LR (parent) indices.
+        tuple[torch.BoolTensor, torch.LongTensor]:
+            ``coarse_mask`` and ``idxHR_to_idxLR`` (high-resolution node index
+            to low-resolution parent index).
     """
     num_nodes = edge_index.max().item() + 1
     row, col = edge_index
@@ -293,19 +330,48 @@ def mesh_coarsening(
     rel_pos_scaling_hr_lr: float        = None,
     scalar_rel_pos:        bool         = False,
 ) -> tuple[torch.BoolTensor, torch.Tensor, torch.LongTensor, torch.LongTensor, torch.Tensor, torch.Tensor, torch.LongTensor]:
-    """Performs (Guillard) mesh coarsening on a graph. The coarsening is performed by dropping nodes, assigning non-dropped nodes to dropped nodes, and merging the edges to preserve the spatial connectivity.
+    """Build one coarser mesh level by delegating node selection to
+    :func:`guillard_coarsening` and pooling the remaining structure.
+
+    First, :func:`guillard_coarsening` identifies which nodes survive in the
+    low-resolution mesh and how every fine node maps to them.  We then:
+
+    * gather the surviving coordinates to form ``pos_2``;
+    * remap and coalesce all edges through ``idx1_to_idx2`` to obtain the coarse
+      connectivity ``edge_index_2`` (optionally pruning long edges when
+      ``max_indegree`` is set);
+    * recompute the coarse edge vectors ``edge_attr_2`` and the fine-to-coarse
+      displacements ``e_12`` that the model can later use for interpolation.
+
+    Continuing the four-node chain example from
+    :func:`guillard_coarsening`, ``pos_2`` contains the coordinates of nodes ``0``
+    and ``2``.  The original edges ``0 ↔ 1`` and ``1 ↔ 2`` collapse into a single
+    coarse edge ``0 ↔ 2``, while node ``3`` attaches to parent ``2`` and
+    contributes a displacement vector stored in ``e_12[3]``.  These artefacts are
+    precisely the tensors that :class:`MeshCoarsening` saves on the graph
+    (``pos_2``, ``edge_index_2``, ``idx1_to_idx2``, ``e_12``) before repeating the
+    procedure for deeper scales.
 
     Args:
-        pos_1 (torch.Tensor): Node position tensor. Shape (num_nodes, dim).
-        edge_index_1 (torch.Tensor): Edge index tensor. Shape (2, num_edges).
-        batch_1 (torch.Tensor, optional): Batch tensor. Shape (num_nodes,). Defaults to None.
-        max_indegree (int, optional): Maximum in-degree allowed. Defaults to None.
-        rel_pos_scaling_lr (float, optional): Scaling factor for the relative position in the lower-resolution graph. Defaults to None.
-        rel_pos_scaling_hr_lr (float, optional): Scaling factor for the relative position between child and parent nodes. Defaults to None.
-        scalar_rel_pos (bool, optional): Whether to use the scalar relative position (distance) or the vector relative position. Defaults to False (vector relative position).
+        pos_1 (torch.Tensor): Node positions at the high-resolution level. Shape
+            ``(num_nodes, dim)``.
+        edge_index_1 (torch.Tensor): High-resolution edges. Shape
+            ``(2, num_edges)``.
+        batch_1 (torch.Tensor, optional): Batch tensor. Shape ``(num_nodes,)``.
+        max_indegree (int, optional): Maximum in-degree allowed in the coarse
+            graph. Defaults to ``None``.
+        rel_pos_scaling_lr (float, optional): Scaling factor applied to
+            ``edge_attr_2``. Defaults to ``None``.
+        rel_pos_scaling_hr_lr (float, optional): Scaling factor applied to
+            ``e_12``. Defaults to ``None``.
+        scalar_rel_pos (bool, optional): Whether to store ``e_12`` as distances
+            instead of displacement vectors. Defaults to ``False``.
 
     Returns:
-        tuple[torch.BoolTensor, torch.Tensor, torch.LongTensor, torch.LongTensor, torch.Tensor, torch.Tensor, torch.LongTensor]: Coarse mask, node position, mapping from HR to LR indices, edge index, edge attribute, relative position of each node with respect to the parent node, and batch tensor.
+        tuple[torch.BoolTensor, torch.Tensor, torch.LongTensor, torch.LongTensor,
+        torch.Tensor, torch.Tensor, torch.LongTensor]: ``coarse_mask``, ``pos_2``,
+        ``idx1_to_idx2``, ``edge_index_2``, ``edge_attr_2``, ``e_12`` and the
+        optional ``batch_2``.
     """
 
     coarse_mask_2, idx1_to_idx2 = guillard_coarsening(pos_1, edge_index_1)
