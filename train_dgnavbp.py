@@ -17,6 +17,7 @@ from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr, Mesh
 from torchvision import transforms as T
 import torch
 
+from dgn4avbp.callbacks import StepTimeTracker
 
 def get_sequence_from_combined(item):
     # item may be: (batches, batch_idx, dataloader_idx) OR just `batches`
@@ -301,16 +302,18 @@ print("edge_attr shape:", tuple(g.edge_attr.shape) if hasattr(g,"edge_attr") els
 #     print_batch_info(sequence)
     
 # Trainer
-prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow", 
-                                                      progress_bar="green1", 
-                                                      progress_bar_finished="green1", 
-                                                      progress_bar_pulse="#6206E0", 
-                                                      batch_progress="green_yellow", 
-                                                      time="grey82", 
-                                                      processing_speed="grey82", 
-                                                      metrics="grey82", 
-                                                      metrics_text_delimiter="\n", 
+prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow",
+                                                      progress_bar="green1",
+                                                      progress_bar_finished="green1",
+                                                      progress_bar_pulse="#6206E0",
+                                                      batch_progress="green_yellow",
+                                                      time="grey82",
+                                                      processing_speed="grey82",
+                                                      metrics="grey82",
+                                                      metrics_text_delimiter="\n",
                                                       metrics_format=".3e"))
+
+time_tracker = StepTimeTracker(warmup_batches=10, log_every_n_steps=50)
 
 ckpt = ModelCheckpoint(dirpath="checkpoints", 
                        filename="diffusion-MuGNN-lowresHIT-{epoch}", 
@@ -319,12 +322,12 @@ ckpt = ModelCheckpoint(dirpath="checkpoints",
                        save_top_k=3,
                        save_last=True)
 
-trainer = L.Trainer(max_epochs=5000, 
-                    accelerator="auto", 
-                    precision="16-mixed", 
-                    callbacks=[ckpt, prog_bar], 
-                    log_every_n_steps=1, 
-                    limit_val_batches=40, 
+trainer = L.Trainer(max_epochs=5000,
+                    accelerator="auto",
+                    precision="16-mixed",
+                    callbacks=[ckpt, prog_bar, time_tracker],
+                    log_every_n_steps=1,
+                    limit_val_batches=40,
                     limit_train_batches=160,
                     accumulate_grad_batches=4,
                     gradient_clip_val=1.0
