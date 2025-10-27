@@ -126,25 +126,40 @@ def edge_pruning(
     assert max_indegree > 0, f'Expected max_indegree to be greater than 0, got {max_indegree}'
     device = edge_index.device
     num_nodes = pos.size(0)
-    indegree = torch.bincount(edge_index[1], minlength=num_nodes) # Compute the in-degree of each node
-    mask = indegree > max_indegree                                # Mask of nodes with in-degree greater than max_in_degree. Shape (num_nodes,)
+    col = edge_index[1]
+    indegree = torch.bincount(col, minlength=num_nodes) # Compute the in-degree of each node
+    mask = indegree > max_indegree                     # Mask of nodes with in-degree greater than max_in_degree. Shape (num_nodes,)
     # If there are no nodes with in-degree greater than max_in_degree, return the input edge_index and edge_attr
     if mask.sum() == 0:
         return edge_index, edge_attr
     masked_nodes = torch.arange(num_nodes, device=device)[mask]   # Nodes with in-degree greater than max_in_degree. Shape (num_masked_nodes,)
-    senders = edge_index[0].split(indegree.tolist())              # Senders of each node. Shape (num_nodes,)
-    masked_senders = [senders[i] for i in masked_nodes.tolist()]  # Senders of nodes with in-degree greater than max_in_degree. Shape (num_masked_nodes,)
-    # Compute the edges to be removed
+
+    # Sort edges by destination so we can slice contiguous per-node segments.
+    #   perm      -> gives the position of each edge in the sorted adjacency.
+    #   row_sorted[start:end] -> all senders that point into the same receiver.
+    # The bookkeeping makes ``edge_pruning`` agnostic to the original edge order
+    # produced by PyG or earlier transforms.
+    perm = torch.argsort(col)
+    row_sorted = edge_index[0][perm]
+
+    offsets = torch.zeros(num_nodes + 1, dtype=torch.long, device=device)
+    offsets[1:] = indegree.cumsum(0)
+
     edges_to_be_removed = torch.zeros(edge_index.size(1), dtype=torch.bool, device=device)
     # Iterate over the nodes with in-degree greater than max_in_degree
-    for i, s in zip(masked_nodes, masked_senders):
-        num_to_be_removed = indegree[i] - max_indegree # Number of edges to be removed
-        # Get the neighbourhood-wise index of the longest edges
-        lengths = torch.norm(pos[s] - pos[i], dim=1)                          # Shape (num_senders,)
-        indices = torch.argsort(lengths, descending=True)[:num_to_be_removed] # Shape (num_to_be_removed,)
-        # Compute the global index of the longest edges
-        indices = indegree[:i].sum() + indices
-        edges_to_be_removed[indices] = True
+    for node in masked_nodes.tolist():
+        start = offsets[node].item()
+        end = offsets[node + 1].item()
+        if end <= start:
+            continue
+        s = row_sorted[start:end]
+        edge_ids = perm[start:end]
+        num_to_be_removed = int(indegree[node].item() - max_indegree)
+        if num_to_be_removed <= 0:
+            continue
+        lengths = torch.norm(pos[s] - pos[node], dim=1)                          # Shape (num_senders,)
+        idx_local = torch.argsort(lengths, descending=True)[:num_to_be_removed]   # Shape (num_to_be_removed,)
+        edges_to_be_removed[edge_ids[idx_local]] = True
     # Remove the edges
     edge_index = edge_index[:, ~edges_to_be_removed]
     if edge_attr is not None:
@@ -202,6 +217,10 @@ def guillard_coarsening(
     The routine follows the node-nested algorithm described by Guillard for
     unstructured meshes.  It proceeds in three conceptual phases:
 
+    ``edge_index`` is allowed to arrive in an arbitrary order—the implementation
+    constructs CSR-style neighbour lists internally so the grouping steps below
+    do not depend on callers pre-sorting or coalescing the adjacency matrix.
+
     1. **Initial coarse selection.**  Starting from all nodes marked as
        ``coarse``, we iterate through the vertices and demote every in-neighbour
        of a coarse node to *fine* status.  This greedy pass guarantees that no
@@ -244,38 +263,65 @@ def guillard_coarsening(
             ``coarse_mask`` and ``idxHR_to_idxLR`` (high-resolution node index
             to low-resolution parent index).
     """
-    num_nodes = edge_index.max().item() + 1
+    num_nodes = pos.size(0)
     row, col = edge_index
     # Determine the indegree of each node
-    indegree = col.bincount()
-    # Find the senders of each node
-    senders = row.split(indegree.tolist())
+    indegree = torch.bincount(col, minlength=num_nodes)
+    # Find the senders of each node regardless of edge ordering
+    # Group incoming neighbours per destination *without* assuming that the
+    # adjacency is pre-sorted.  We sort only the destination column and use
+    # prefix sums of the indegree to compute slicing offsets.  This mirrors a
+    # CSR (compressed sparse row) layout and gives us ``senders[i]`` as a view
+    # over all nodes with edges into vertex ``i`` regardless of the input
+    # ordering.
+    perm = torch.argsort(col)
+    row_sorted = row[perm]
+    offsets = torch.zeros(num_nodes + 1, dtype=torch.long, device=edge_index.device)
+    offsets[1:] = indegree.cumsum(0)
+    senders = [row_sorted[offsets[i].item():offsets[i + 1].item()] for i in range(num_nodes)]
     # Node-nested coarsening by Guillard
     coarse_mask = torch.ones(num_nodes, dtype=torch.bool, device=edge_index.device)
-    for coarse_node, s in zip(coarse_mask, senders):
-        if coarse_node: coarse_mask[s] = False
+    for i in range(num_nodes):
+        if coarse_mask[i]:
+            s = senders[i]
+            if s.numel() > 0:
+                coarse_mask[s] = False
     # Create clusters by:
     # For each node with coarse_node==False, find its closest incoming neighbour with coarse_node==True.
     # For each node with coarse_node==True, the result is the node itself.
     parents = torch.arange(num_nodes, device=edge_index.device)
-    for i, coarse_node, s in zip(range(num_nodes), coarse_mask, senders):
-        if not coarse_node:
-            dist = torch.norm(pos[i] - pos[s], dim=1)
-            dist[~coarse_mask[s]] = float('inf')
-            if dist.min() < float('inf'):
-                parents[i] = s[dist.argmin()]
-            else:
-                parents[i] = -1 # No parent node found yet
+    for i in range(num_nodes):
+        if coarse_mask[i]:
+            continue
+        s = senders[i]
+        if s.numel() == 0:
+            parents[i] = -1
+            continue
+        dist = torch.norm(pos[i].unsqueeze(0) - pos[s], dim=1)
+        neighbour_mask = coarse_mask[s]
+        dist[~neighbour_mask] = float('inf')
+        if torch.isfinite(dist).any():
+            parents[i] = s[dist.argmin()]
+        else:
+            parents[i] = -1 # No parent node found yet
     # For those nodes that have not found a parent, set the parent to the parent of the closest neighbour which has a parent
     iter = 0
     while (parents == -1).any():
         iter += 1
-        for i, coarse_node, s in zip(range(num_nodes), coarse_mask, senders):
-            if parents[i] == -1:
-                s = s[parents[s] != -1]                    # Remove the neighbours that have not found a parent
-                dist = torch.norm(pos[i] - pos[s], dim=1)  # Compute the distance to the remaining neighbours
-                if dist.numel() > 0:
-                    parents[i] = parents[s[dist.argmin()]] # Set the parent to the parent of the closest neighbour that has a parent. If no neighbour has a parent, the parent is -1
+        for i in range(num_nodes):
+            if parents[i] != -1:
+                continue
+            s = senders[i]
+            if s.numel() == 0:
+                continue
+            valid = parents[s] != -1
+            if not valid.any():
+                continue
+            s_valid = s[valid]
+            dist = torch.norm(pos[i].unsqueeze(0) - pos[s_valid], dim=1)
+            if dist.numel() > 0:
+                nearest = s_valid[dist.argmin()]
+                parents[i] = parents[nearest]
         if iter >= max_iter:
             raise RuntimeError(f'Maximum number of iterations reached in Guillard coarsening during cluster creation. The graph may contain isolated nodes.')
     idxHR_to_idxLR = torch.full((num_nodes,), -1, dtype=torch.long, device=edge_index.device)
