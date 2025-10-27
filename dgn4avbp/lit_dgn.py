@@ -341,25 +341,57 @@ class LitDiffusionCFD(L.LightningModule):
         loss = (per_sample * sample_weight).mean()
         return loss
 
-    def training_step(self, batch: Any, batch_idx: int):
-        streams = self._as_streams(batch)
+    def training_step(self, batch, batch_idx: int):
+        streams = self._as_streams(batch)   # list of sequences (one per stream)
         losses = []
+        total_graphs = 0
+
         for seq in streams:
             graph = self._prepare_graph(seq)
+            # per-stream scalar loss (already averaged per-graph internally)
             losses.append(self._one_graph_loss(graph))
+            # how many graphs in THIS prepared graph?
+            total_graphs += int(graph.batch.max().item()) + 1
+
+        # You averaged across streams; this is your step scalar
         loss = torch.stack(losses).mean()
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
+
+        # <-- KEY: tell Lightning how many graphs this step represented
+        self.log(
+            "train/loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=total_graphs,    # <---- critical
+            sync_dist=True              # good practice for multi-GPU
+        )
         return loss
 
-    def validation_step(self, batch: Any, batch_idx: int):
+    def validation_step(self, batch, batch_idx: int):
         streams = self._as_streams(batch)
         losses = []
+        total_graphs = 0
+
         for seq in streams:
             graph = self._prepare_graph(seq)
             losses.append(self._one_graph_loss(graph))
+            total_graphs += int(graph.batch.max().item()) + 1
+
         val_loss = torch.stack(losses).mean()
-        self.log("val/loss", val_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
+        self.log(
+            "val/loss",
+            val_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            batch_size=total_graphs,    # <---- same idea
+            sync_dist=True
+        )
         return val_loss
+
 
     def configure_optimizers(self):
         opt = optim.Adam(self.net.parameters(), lr=self.lr)
@@ -390,7 +422,7 @@ class LitDiffusionCFD(L.LightningModule):
                 g = p.grad.detach()
                 total += float(g.norm(2).item() ** 2)
         grad_norm = total ** 0.5
-        self.log("train/grad_norm", grad_norm, on_step=True, prog_bar=False)
+        self.log("train/grad_norm", grad_norm, on_step=True, prog_bar=False,logger=True,)
 
         # ---- Add these two methods inside LitDiffusionCFD ----
     @torch.no_grad()

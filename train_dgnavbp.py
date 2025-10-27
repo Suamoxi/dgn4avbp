@@ -1,63 +1,74 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-from Dataset import create_cfd_datamodule,estimate_mesh_scales,_sample_graphs_for_stats
-from utils import read_metadata,load_coo_data,create_data_list,create_graph_data
+import sys
+import logging
+from datetime import datetime
+
+import torch
 import lightning as L
+from torch_geometric.data import Data, Batch
+from torchvision import transforms as T
+
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
+from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
+from lightning.pytorch.callbacks import Callback
+
+# --- your domain imports ---
+from Dataset import create_cfd_datamodule, estimate_mesh_scales, _sample_graphs_for_stats
+from utils import read_metadata, load_coo_data, create_data_list, create_graph_data
 from dgn4avbp.diffusion_process import DiffusionProcess
 from dgn4avbp.dgn_model import DiffusionGraphNet
 from dgn4avbp.step_sampler import ImportanceStepSampler
 from dgn4avbp.lit_dgn import LitDiffusionCFD
 from dgn4avbp.losses import HybridLoss
-from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
-from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
-from torchvision import transforms as T
-from torch_geometric.data import Data, Batch
-import torch
-
-from dgn4avbp.transform_locals import EnsureEdgeAttrFromPos, ScaleEdgeAttr, MeshCoarsening, ZScoreTarget,ScaleAttr
-from torchvision import transforms as T
-import torch
-
+from dgn4avbp.transform_locals import (
+    EnsureEdgeAttrFromPos, ScaleEdgeAttr, MeshCoarsening, ZScoreTarget, ScaleAttr
+)
 from dgn4avbp.callbacks import StepTimeTracker
 
+
+# =========================
+# Logging & utility helpers
+# =========================
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
+LOG_DIR = os.environ.get("LOG_DIR", f"/scratch/{os.environ.get('USER','user')}/logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+file_log_path = os.path.join(LOG_DIR, f"train_{_ts}.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),   # -> captured by Slurm .out
+        logging.FileHandler(file_log_path)   # -> persistent text log
+    ]
+)
+log = logging.getLogger("train")
+log.info("Initialized logging. Slurm .out and file logs are active.")
+log.info(f"LOG_DIR={LOG_DIR}")
+
 def get_sequence_from_combined(item):
-    # item may be: (batches, batch_idx, dataloader_idx) OR just `batches`
     if isinstance(item, tuple) and len(item) == 3:
         batches, _batch_idx, _dl_idx = item
     else:
         batches = item
-
-    # If CombinedLoader was built as {"main": loader}
     if isinstance(batches, dict):
         sequence = next(iter(batches.values()))
     else:
         sequence = batches
-
-    # Some wrappers yield a tuple rather than list — treat them the same.
     if isinstance(sequence, tuple):
         sequence = list(sequence)
     return sequence  # list[Batch]
 
-def print_batch_info(sequence):
-    assert isinstance(sequence, (list, tuple)), f"Expected list/tuple, got {type(sequence)}"
-    print(f"    Number of time steps in batch: {len(sequence)}")
-    for t, g in enumerate(sequence):
-        # If someone tucked the Batch inside {"main": Batch} per time-step:
-        if isinstance(g, dict) and "main" in g:
-            g = g["main"]
-        assert isinstance(g, (Batch, Data)), f"Time step {t} is {type(g)}"
-        print(f"    Time step {t+1}:")
-        print(f"        Number of graphs in batch: {g.num_graphs}")
-        print(f"        Total number of nodes: {g.num_nodes}")
-        print(f"        Total number of edges: {g.num_edges}")
-        if hasattr(g, 'target'):
-            print(f"        target shape: {tuple(g.target.shape)}")
-        if hasattr(g, 'edge_attr'):
-            print(f"        edge_attr shape: {tuple(g.edge_attr.shape)}")
-        if hasattr(g, 'cells') and isinstance(g.cells, list) and g.cells and g.cells[0] is not None:
-            print(f"        Total number of cells: {len(g.cells[0])}")
-        if hasattr(g, 'time'):
-            print(f"        time mean per-graph: {g.time.view(g.num_graphs, -1).mean(dim=-1)}")
 
+# =========================
+# Datamodule (yours, + logs)
+# =========================
 def _sample_graphs_for_stats(meta, K=200):
     pos0, edge_index0, cells0 = load_coo_data(
         meta['coo_file'], meta['mesh_file'], meta['coordinate_paths']
@@ -70,40 +81,14 @@ def _sample_graphs_for_stats(meta, K=200):
     K = min(K, len(it_list_total))
     samples = []
     for k in range(K):
-        case, sim, t = it_list_total[k][0]        # take the first step of each sequence
+        case, sim, t = it_list_total[k][0]        # first step of each sequence
         fpath = file_list[str(case)][str(t)]
         g = create_graph_data(pos0, edge_index0, fpath, meta, cells0)
         samples.append(g)
     return samples, pos0, edge_index0
 
 def _estimate_mesh_scales(pos, edge_index, quantile=0.5):
-    """Estimate characteristic mesh spacings from the graph connectivity.
-
-    The function measures the Euclidean length of every edge in the base mesh,
-    then selects the requested quantile (median by default) as the reference
-    spacing ``h``.  The resulting value is representative of the typical
-    distance between neighbouring mesh vertices and is later used to
-    normalise edge-relative position vectors.  We also precompute a list of
-    successively coarser spacings used by the multiresolution coarsening
-    transform.
-
-    Args:
-        pos (torch.Tensor): Vertex positions of shape ``[num_nodes, 3]``.
-        edge_index (torch.Tensor): Directed COO graph edges of shape
-            ``[2, num_edges]``.
-        quantile (float, optional): Quantile of the edge-length distribution
-            to use as the characteristic spacing.  Defaults to the median.
-
-    Returns:
-        Tuple[float, List[float]]: The characteristic spacing ``h`` and a list
-        of per-level spacings ``[h, 2h, 4h, 8h]`` that match the resolution of
-        the coarsened meshes.
-    """
-
     row, col = edge_index
-    # Compute all undirected edge lengths; ``edge_index`` stores both
-    # directions so each physical edge is measured twice, which is acceptable
-    # for the quantile computation.
     edge_len = (pos[col] - pos[row]).norm(dim=1)
     h = edge_len.quantile(quantile).item()
     rel_pos_scaling = [h, 2 * h, 4 * h, 8 * h]
@@ -119,7 +104,6 @@ class cfd_datamodule(L.LightningDataModule):
         self.start_idx    = [0] * len(metadata_files)
         self.split        = train_val_split
 
-        # will be set in setup()
         self.graph_transform = None
         self._zscore_mean = None
         self._zscore_std  = None
@@ -127,32 +111,29 @@ class cfd_datamodule(L.LightningDataModule):
         self._h = None
 
     def setup(self, stage: str):
-        # --- compute stats ONCE from the first dataset (or loop over all and concat) ---
         meta0 = read_metadata(self.metadata_files[0])
         samples, pos0, edge_index0 = _sample_graphs_for_stats(meta0, K=200)
 
-        # target mean/std (your target has 3 velocity components)
-        tgt = torch.cat([g.target for g in samples], dim=0)  # shape (N_total, 3)
-        self._zscore_mean = tgt.mean(0)                      # (3,)
-        self._zscore_std  = tgt.std(0)                       # (3,)
-        print(self._zscore_mean,self._zscore_std)
-        # mesh scales for edge normalization & LR scaling
-        self._h, self._rel_pos_scales = _estimate_mesh_scales(pos0, edge_index0)
+        tgt = torch.cat([g.target for g in samples], dim=0)  # (N_total, 3)
+        self._zscore_mean = tgt.mean(0)
+        self._zscore_std  = tgt.std(0)
+        log.info(f"zscore_mean={self._zscore_mean.tolist()} zscore_std={self._zscore_std.tolist()}")
 
-        # --- build the graph transform pipe (reused for train/val/test) ---
+        self._h, self._rel_pos_scales = _estimate_mesh_scales(pos0, edge_index0)
+        log.info(f"median_h={self._h:.6e} rel_pos_scales={self._rel_pos_scales}")
+
         self.graph_transform = T.Compose([
-            EnsureEdgeAttrFromPos(),         # edge_attr = pos[j]-pos[i]
-            ScaleEdgeAttr(1/self._h),          # normalize HR edge vectors by median spacing
-            ZScoreTarget(self._zscore_mean, self._zscore_std),  # normalize targets
+            EnsureEdgeAttrFromPos(),
+            ScaleEdgeAttr(1/self._h),
+            ZScoreTarget(self._zscore_mean, self._zscore_std),
             MeshCoarsening(
                 num_scales=5,
-                max_indegree=None,           # set later for unstructured meshes
+                max_indegree=None,
                 rel_pos_scaling=None,
-                scalar_rel_pos=False,         # keep 3D vectors for LR edges
+                scalar_rel_pos=False,
             ),
         ])
 
-        # --- create loaders with this transform applied in the Collater ---
         if stage == "fit":
             self.train_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
@@ -164,22 +145,12 @@ class cfd_datamodule(L.LightningDataModule):
                 shuffle=False, split=self.split, flag='val',
                 collater_transform=self.graph_transform
             )
-
-        if stage == "test":
+        if stage in {"test", "predict"}:
             self.val_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=False, split=self.split, flag='val',
                 collater_transform=self.graph_transform
             )
-        if stage == "predict":
-            self.val_cfd_datamodule = create_cfd_datamodule(
-                self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
-                shuffle=False, split=self.split, flag='val',
-                collater_transform=self.graph_transform
-            )
-
-    def prepare_data(self):
-        None
 
     def train_dataloader(self):
         return self.train_cfd_datamodule.get_combined_loader()
@@ -192,35 +163,18 @@ class cfd_datamodule(L.LightningDataModule):
 
     def predict_dataloader(self):
         return self.val_cfd_datamodule.get_combined_loader(mode='sequential')
-    
 
 
-
-
-metadata_files_fernando = [
-        os.path.join('/scratch/coop/theret/cfd-dataset/tutorial/sample_dataset/metadata.yaml')
-   ]
+# =========================
+# Model & training objects
+# =========================
 metadata_files = [os.path.join('/scratch/coop/theret/HIT_LES_FORCED/metadata.yaml')]
-# graph_transform = T.Compose([
-#     EnsureEdgeAttrFromPos(),                # builds base edge_attr from pos (if you don’t already)
-#     ScaleEdgeAttr(0.015),                   # like DGN4CFD
-#     #EdgeCondFreeStreamLocalAxes([...]),     # optional: your edge_cond
-#     ScaleAttr('target', vmin=0, vmax=1000),# your ranges
-#     MeshCoarsening(
-#         num_scales=4,
-#         max_indegree=None,
-#         #rel_pos_scaling=[0.015, 0.03, 0.06, 0.12],
-#         scalar_rel_pos=True,
-#     ),
-# ])
 
-# Diffusion process
 diffusion_process = DiffusionProcess(
     num_steps     = 1000,
     schedule_type = 'linear',
 )
 
-# Model
 arch = {
     'in_node_features':   3,
     'cond_node_features': 0,
@@ -229,8 +183,8 @@ arch = {
     'fnns_width':         128,
     'aggr':               'sum',
     'dropout':            0.1,
-    'dim':                  3,
-    "scalar_rel_pos":   False
+    'dim':                3,
+    "scalar_rel_pos":     False
 }
 net = DiffusionGraphNet(
     diffusion_process  = diffusion_process,
@@ -238,11 +192,9 @@ net = DiffusionGraphNet(
     arch               = arch,
 )
 
-# Loss and sampler
-criterion = HybridLoss()              # (model, graph) -> [B]
+criterion = HybridLoss()
 step_sampler_factory = ImportanceStepSampler
 
-# LightningModule wrapper
 lit = LitDiffusionCFD(
     net=net,
     diffusion_process=diffusion_process,
@@ -251,136 +203,200 @@ lit = LitDiffusionCFD(
     lr=1e-4,
     scheduler_cfg={"factor":0.1, "patience":250},
     pack_mode=None,
-    pack_win_len=10,            # <— use these names
+    pack_win_len=10,
     pack_stride=1,
-    pack_select="last",
+    pack_select="random",
     y_idx=[0,1,2],
     cond_idx=None,
 )
 
-
-# DataModule from your CFDDataset
 dm = cfd_datamodule(metadata_files, train_val_split=0.8)
-dm.setup(stage='fit')
-# Get the combined loader
-# combined_loader = dm.train_dataloader()
-# cfd_datamodule_train  = dm.train_cfd_datamodule
-# print(f"Number of subdatasets: {len(cfd_datamodule_train.subdatasets)}")
-# for i, subdataset in enumerate(cfd_datamodule_train.subdatasets):
-#         print(f"Subdataset {i+1} batch size: {dm.batch_sizes[i]}")
+# dm.setup(stage='fit')
 
-dl = dm.train_dataloader()
-item = next(iter(dl))
-
-sequence = get_sequence_from_combined(item)  # list of length seq_len
-g = sequence[-1]  # last timestep PyG Batch
-
-print("seq_len:", len(sequence))
-print("num_graphs:", g.num_graphs)
-print("num_nodes:", g.num_nodes)
-print("target shape:", tuple(g.target.shape))
-print("edge_attr shape:", tuple(g.edge_attr.shape) if hasattr(g,"edge_attr") else None)
+# # quick inspection (logged)
+# dl = dm.train_dataloader()
+# item = next(iter(dl))
+# sequence = get_sequence_from_combined(item)
+# g = sequence[-1]
+# log.info(f"seq_len={len(sequence)} num_graphs={g.num_graphs} num_nodes={g.num_nodes} "
+#          f"target_shape={tuple(g.target.shape)} "
+#          f"edge_attr_shape={tuple(g.edge_attr.shape) if hasattr(g,'edge_attr') else None}")
 
 
-# cl = dm.train_dataloader()
+# =========================
+# Callbacks: progress, LR, GPU
+# =========================
+USE_RICH = sys.stdout.isatty() and os.environ.get("LIGHTNING_DISABLE_PROGRESS_BAR","0") != "1"
+prog_bar = None
+if USE_RICH:
+    prog_bar = RichProgressBar(theme=RichProgressBarTheme(
+        description="green_yellow",
+        progress_bar="green1",
+        progress_bar_finished="green1",
+        progress_bar_pulse="#6206E0",
+        batch_progress="green_yellow",
+        time="grey82",
+        processing_speed="grey82",
+        metrics="grey82",
+        metrics_text_delimiter="\n",
+        metrics_format=".3e"
+    ))
 
-# # 1) Inspect children of the CombinedLoader
-# subs = getattr(cl, "loaders", None)  # dict or list
-# if isinstance(subs, dict):
-#     for k, v in subs.items():
-#         has_len = hasattr(v, "__len__")
-#         print(k, type(v), "has_len?", has_len, ("len:", len(v)) if has_len else "")
-# else:
-#     print("single loader:", type(cl), "has_len?", hasattr(cl, "__len__"), (len(cl) if hasattr(cl, "__len__") else ""))
+class CompactConsoleLogger(Callback):
+    """Epoch-level metric/LR printer to stdout (Slurm .out)."""
+    def _fmt(self, x):
+        try:
+            return f"{float(x):.6e}"
+        except Exception:
+            return str(x)
+
+    def _current_lrs(self, trainer):
+        lrs = []
+        try:
+            for opt in trainer.optimizers:
+                for pg in opt.param_groups:
+                    lr = pg.get("lr", None)
+                    if lr is not None:
+                        lrs.append(lr)
+        except Exception:
+            pass
+        return lrs
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        m = trainer.callback_metrics
+        lrs = self._current_lrs(trainer)
+        lr_str = ",".join(self._fmt(lr) for lr in lrs) if lrs else "nan"
+        msg = (
+            f"epoch={trainer.current_epoch} "
+            f"train_loss_epoch={self._fmt(m.get('train_loss_epoch','nan'))} "
+            f"val_loss={self._fmt(m.get('val/loss','nan'))} "
+            f"lr={lr_str}"
+        )
+        log.info(msg)
+
+class GPUMonitor(Callback):
+    """Logs GPU memory and optional utilization every N steps."""
+    def __init__(self, log_every_n_steps=50):
+        self.every = int(log_every_n_steps)
+
+    def _maybe_query_nvidia_smi(self):
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, check=True
+            ).stdout.strip()
+            # If multiple GPUs, show only the one Lightning is likely using (index 0)
+            return out.splitlines()[0] if out else None
+        except Exception:
+            return None
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if (batch_idx + 1) % self.every != 0:
+            return
+        if torch.cuda.is_available():
+            mem_alloc = torch.cuda.memory_allocated() / (1024**2)
+            mem_reserved = torch.cuda.memory_reserved() / (1024**2)
+            max_alloc = torch.cuda.max_memory_allocated() / (1024**2)
+            msg = (f"GPU mem (MB): alloc={mem_alloc:.1f} reserved={mem_reserved:.1f} "
+                   f"max_alloc={max_alloc:.1f}")
+            util = self._maybe_query_nvidia_smi()
+            if util:
+                msg += f" | nvidia-smi (util%, tempC): {util}"
+            log.info(msg)
+
+class StepConsoleLogger(Callback):
+    def __init__(self, every=50, warmup=5):
+        self.every = int(every)
+        self.warmup = int(warmup)
+    def _fmt(self, x):
+        try:
+            return f"{float(x):.6e}"
+        except Exception:
+            return str(x)
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if batch_idx + 1 < self.warmup:
+            return
+        if (batch_idx + 1) % self.every != 0:
+            return
+        loss_val = None
+        if isinstance(outputs, torch.Tensor):
+            loss_val = outputs.detach()
+        elif isinstance(outputs, dict) and "loss" in outputs:
+            loss_val = outputs["loss"]
+        if loss_val is None:
+            loss_val = trainer.callback_metrics.get("train/loss") or trainer.callback_metrics.get("train_loss")
+        lrs = []
+        try:
+            for opt in trainer.optimizers:
+                for pg in opt.param_groups:
+                    lr = pg.get("lr", None)
+                    if lr is not None:
+                        lrs.append(lr)
+        except Exception:
+            pass
+        lr_str = ",".join(self._fmt(lr) for lr in lrs) if lrs else "nan"
+        msg = f"step={batch_idx+1} loss={self._fmt(loss_val) if loss_val is not None else 'nan'} lr={lr_str}"
+        log.info(msg)
 
 
-# # Iterate safely
-# for i, item in enumerate(combined_loader):
-#     print(f"\nBatch {i+1}:")
-#     sequence = get_sequence_from_combined(item)
-#     print("Dataloader main (Type: Default):")
-#     print_batch_info(sequence)
-    
-# Trainer
-prog_bar = RichProgressBar(theme=RichProgressBarTheme(description="green_yellow",
-                                                      progress_bar="green1",
-                                                      progress_bar_finished="green1",
-                                                      progress_bar_pulse="#6206E0",
-                                                      batch_progress="green_yellow",
-                                                      time="grey82",
-                                                      processing_speed="grey82",
-                                                      metrics="grey82",
-                                                      metrics_text_delimiter="\n",
-                                                      metrics_format=".3e"))
 
-time_tracker = StepTimeTracker(warmup_batches=10, log_every_n_steps=50)
+# =========================
+# Checkpointing & Trainer
+# =========================
+ckpt_dir = os.path.join(LOG_DIR, "checkpoints")
+os.makedirs(ckpt_dir, exist_ok=True)
+ckpt = ModelCheckpoint(
+    dirpath=ckpt_dir,
+    filename="diffusion-MuGNN-lowresHIT-{epoch}",
+    monitor="val/loss",
+    mode="min",
+    save_top_k=3,
+    save_last=True
+)
 
-ckpt = ModelCheckpoint(dirpath="checkpoints", 
-                       filename="diffusion-MuGNN-lowresHIT-{epoch}", 
-                       monitor="val/loss", 
-                       mode="min", 
-                       save_top_k=3,
-                       save_last=True)
+csv_logger = CSVLogger(save_dir=LOG_DIR, name="lightning_csv")
+tb_logger  = TensorBoardLogger(save_dir=LOG_DIR, name="lightning_tb")
 
-trainer = L.Trainer(max_epochs=5000,
-                    accelerator="auto",
-                    precision="16-mixed",
-                    callbacks=[ckpt, prog_bar, time_tracker],
-                    log_every_n_steps=1,
-                    limit_val_batches=40,
-                    limit_train_batches=160,
-                    accumulate_grad_batches=4,
-                    gradient_clip_val=1.0
-                    )
+time_tracker = StepTimeTracker(warmup_batches=0, log_every_n_steps=1)
 
-# Train
-# after you construct `trainer`, `lit`, and `dm`:
+_callbacks = [ckpt, time_tracker, CompactConsoleLogger(), GPUMonitor(log_every_n_steps=1),StepConsoleLogger(every=10,warmup=0)]
+if prog_bar is not None:
+    _callbacks.insert(0, prog_bar)
+
+trainer = L.Trainer(
+    max_epochs=5000,
+    accelerator="auto",
+    precision="16-mixed",
+    callbacks=_callbacks,
+    logger=[csv_logger, tb_logger],
+    enable_progress_bar=(prog_bar is not None),
+    log_every_n_steps=1,
+    limit_val_batches=40,
+    limit_train_batches=160,
+    accumulate_grad_batches=4,
+    gradient_clip_val=1.0,
+    default_root_dir=LOG_DIR
+)
+
+# =========================
+# (Optional) resume
+# =========================
+#ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last-v6.ckpt"
 ckpt_path = None
-ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last-v6.ckpt"  # or a specific epoch file like "checkpoints/diffusion-epoch=1.ckpt"
+if ckpt_path and not os.path.isabs(ckpt_path):
+    ckpt_path = os.path.abspath(ckpt_path)
+if ckpt_path and os.path.exists(ckpt_path):
+    log.info(f"Resuming from checkpoint: {ckpt_path}")
+else:
+    if ckpt_path:
+        log.warning(f"Checkpoint not found: {ckpt_path} (starting from scratch)")
+        ckpt_path = None
 
-
-
+# =========================
+# GO
+# =========================
 if ckpt_path is None:
-    trainer.fit(lit, dm) 
+    trainer.fit(lit, dm)
 else:
     trainer.fit(lit, dm, ckpt_path=ckpt_path)
-    
-
-# # 1) Rebuild lit exactly as for training
-# lit = LitDiffusionCFD(
-#     net=net,
-#     diffusion_process=diffusion_process,
-#     criterion=criterion,
-#     step_sampler_factory=step_sampler_factory,
-#     lr=1e-4,
-#     scheduler_cfg={"factor":0.1, "patience":50},
-#     pack_mode="y_window_cond_static",
-#     pack_win_len=1,
-#     pack_stride=1,
-#     pack_select="random",
-#     y_idx=[0,1,2],
-#     cond_idx=None,
-# )
-
-# # 2) Load state dict directly (skip Lightning’s legacy patcher)
-# ckpt = torch.load("checkpoints/last.ckpt", map_location="cpu")
-# lit.load_state_dict(ckpt["state_dict"], strict=True)  # strict=False if you changed the model
-# lit.eval().freeze()
-
-
-
-# # 3) Predict as usual
-
-# trainer = L.Trainer( 
-#                     accelerator="auto", 
-#                     precision="16-mixed", 
-#                     callbacks=[ckpt], 
-#                     log_every_n_steps=10, 
-#                     limit_val_batches=20, 
-#                     limit_train_batches=80,
-#                     accumulate_grad_batches=64)
-
-
-# dm.setup(stage="predict")
-# pred = trainer.predict(lit, dm)
-
