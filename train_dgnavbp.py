@@ -15,6 +15,7 @@ from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, RichProgressBar
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.profilers import SimpleProfiler
 
 # --- your domain imports ---
 from Dataset import create_cfd_datamodule, estimate_mesh_scales, _sample_graphs_for_stats
@@ -168,17 +169,12 @@ class cfd_datamodule(L.LightningDataModule):
                 shuffle=True, split=self.split, flag='train',
                 collater_transform=self.graph_transform,
                 dataloader_kwargs=train_loader_kwargs,
-                cache_sequences=False,
             )
             self.val_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=False, split=self.split, flag='val',
                 collater_transform=self.graph_transform,
                 dataloader_kwargs=val_loader_kwargs,
-                # Validation/test reuse a deterministic index order. Enable the
-                # dataset-level cache so we only pay the HDF5 + SymPy cost once
-                # per sequence and serve clones on subsequent epochs.
-                cache_sequences=True,
             )
         if stage in {"test", "predict"}:
             self.val_cfd_datamodule = create_cfd_datamodule(
@@ -186,7 +182,6 @@ class cfd_datamodule(L.LightningDataModule):
                 shuffle=False, split=self.split, flag='val',
                 collater_transform=self.graph_transform,
                 dataloader_kwargs=val_loader_kwargs,
-                cache_sequences=True,
             )
 
     def train_dataloader(self):
@@ -381,11 +376,13 @@ class StepConsoleLogger(Callback):
 # =========================
 # Checkpointing & Trainer
 # =========================
+
 ckpt_dir = os.path.join(LOG_DIR, "checkpoints")
 os.makedirs(ckpt_dir, exist_ok=True)
+
 ckpt = ModelCheckpoint(
     dirpath=ckpt_dir,
-    filename="diffusion-MuGNN-lowresHIT-{epoch}",
+    filename="test_val-{epoch}",
     monitor="val/loss",
     mode="min",
     save_top_k=3,
@@ -402,7 +399,7 @@ if prog_bar is not None:
     _callbacks.insert(0, prog_bar)
 
 trainer = L.Trainer(
-    max_epochs=5000,
+    max_epochs=1,
     accelerator="auto",
     precision="16-mixed",
     callbacks=_callbacks,
@@ -411,15 +408,16 @@ trainer = L.Trainer(
     log_every_n_steps=1,
     limit_val_batches=40,
     limit_train_batches=160,
-    accumulate_grad_batches=4,
+    accumulate_grad_batches=1,
     gradient_clip_val=1.0,
-    default_root_dir=LOG_DIR
+    default_root_dir=LOG_DIR,
+    profiler=SimpleProfiler()
 )
 
 # =========================
 # (Optional) resume
 # =========================
-#ckpt_path = "/scratch/coop/theret/nn4avbp/checkpoints/last-v6.ckpt"
+#ckpt_path = "/scratch/coop/theret/nn4avbp/logs/train_dgn4avbp_74059/checkpoints/last.ckpt"
 ckpt_path = None
 if ckpt_path and not os.path.isabs(ckpt_path):
     ckpt_path = os.path.abspath(ckpt_path)

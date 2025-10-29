@@ -12,3 +12,6 @@ __pycache__/
 *.err
 *.out
 *.sh
+/logs
+# Training logs
+logs/
