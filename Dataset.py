@@ -68,10 +68,16 @@ class CFDDataset:
         metadata_files, batch_sizes, loader_types, start_idx, 
         shuffle=False, split=1.0, flag='train', nodes_per_sample=None,
         collater_transform=None,   # <— add this
+        dataloader_kwargs=None,
     ):
         self.subdatasets = []
         self.dataloaders = []
+        # Keep a single Collater instance so that transforms (e.g. mesh
+        # coarsening) are reused across every time step we collate.
         self.collater = Collater(transform=collater_transform)  # <— use it
+        # Extra keyword arguments allow the caller to tune worker/prefetch
+        # behaviour per-stage (train/val/test) without rewriting this class.
+        self._dataloader_kwargs = dataloader_kwargs or {}
 
         for metadata_file, batch_size, loader_type, start in zip(metadata_files, batch_sizes, loader_types, start_idx):
             subdataset = CFDSubDataset(metadata_file, start, shuffle, split, flag)
@@ -86,6 +92,8 @@ class CFDDataset:
         out = []
         for t in range(seq_len):
             graphs_at_t = [seq[t] for seq in batch]     # List[Data] at time t
+            # Collater knows how to assemble per-time-step graphs into a single
+            # batch while keeping multiscale connectivity consistent.
             batched = self.collater.collate(graphs_at_t)  # <-- Collater fixes multiscale indices and applies transforms
             out.append(batched)
         return out
@@ -96,10 +104,16 @@ class CFDDataset:
         common_kwargs = {
             'batch_size': batch_size,
             'collate_fn': self._sequence_collate,   # <-- uses Collater(transform=...)
+            # Sensible defaults keep backwards compatibility if the caller does
+            # not override worker parameters.
             'num_workers': 1,
             'prefetch_factor': 1
             # DO NOT put 'shuffle' here for IterableDataset
         }
+
+        if self._dataloader_kwargs:
+            # Allow per-instance overrides such as num_workers/prefetch_factor.
+            common_kwargs.update(self._dataloader_kwargs)
 
         if loader_type != 'default':
             raise ValueError(f"Unsupported loader type: {loader_type}")
@@ -132,10 +146,15 @@ class CFDDataset:
 def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx,
                           shuffle=False, split=1.0, flag='train',
                           nodes_per_sample=None,
-                          collater_transform=None):     # <— add this
+                          collater_transform=None,
+                          dataloader_kwargs=None):     # <— add this
+    # The helper simply forwards the custom DataLoader kwargs to CFDDataset so
+    # higher-level modules (Lightning data module) can decide how aggressively
+    # to parallelise each stage.
     return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx,
                       shuffle, split, flag, nodes_per_sample,
-                      collater_transform=collater_transform)
+                      collater_transform=collater_transform,
+                      dataloader_kwargs=dataloader_kwargs)
 
 
 @torch.no_grad()
