@@ -12,11 +12,19 @@ from torchvision import transforms as T
 from torch.utils.data import DataLoader as TorchDataLoader
 
 class CFDSubDataset(IterableDataset):
-    def __init__(self, metadata_file, start_idx, shuffle=False, split=1.0, flag: str = 'train'):
+    def __init__(
+        self,
+        metadata_file,
+        start_idx,
+        shuffle=False,
+        split=1.0,
+        flag: str = 'train',
+        cache_sequences: bool = False,
+    ):
         self.metadata = read_metadata(metadata_file)
         self.node_positions, self.edge_indices, self.cells = load_coo_data(
-            self.metadata['coo_file'], 
-            self.metadata['mesh_file'], 
+            self.metadata['coo_file'],
+            self.metadata['mesh_file'],
             self.metadata['coordinate_paths']
         )
         self.edge_indices = to_undirected(self.edge_indices)
@@ -41,7 +49,15 @@ class CFDSubDataset(IterableDataset):
             self.current_idx = torch.arange(len(self.idx))
         self.count = 0
 
-    def getitem(self, idx):
+        # Validation/test loops repeatedly iterate over the same deterministic
+        # indices. When ``cache_sequences`` is enabled we memoise each
+        # preprocessed sequence (list[Data]) so subsequent epochs reuse the
+        # in-memory tensors instead of reopening HDF5 files and recomputing
+        # derived variables.
+        self._cache_enabled = cache_sequences and flag != 'train'
+        self._sequence_cache: dict[int, list[Data]] = {} if self._cache_enabled else None
+
+    def _load_sequence(self, idx: int) -> list[Data]:
         sequence = []
         for i in range(self.metadata['seq_len']):
             case, sim, time_step = self.it_list_total[idx][i]
@@ -49,6 +65,25 @@ class CFDSubDataset(IterableDataset):
             graph_data = create_graph_data(self.node_positions, self.edge_indices, file_name, self.metadata, self.cells)
             sequence.append(graph_data)
         return sequence
+
+    def getitem(self, idx):
+        int_idx = int(idx)
+        if self._cache_enabled:
+            assert self._sequence_cache is not None
+            cached = self._sequence_cache.get(int_idx)
+            if cached is None:
+                # Store the CPU copies produced during the initial load. We
+                # clone on the way out so cached tensors stay detached from any
+                # later device transfers/mutations performed by the training
+                # loop.
+                self._sequence_cache[int_idx] = self._load_sequence(int_idx)
+                cached = self._sequence_cache[int_idx]
+            # ``Data.clone()`` is inexpensive compared to the HDF5 + SymPy
+            # pipeline. Return fresh copies to keep DataLoader semantics where
+            # each consumer owns its batch.
+            return [data.clone() for data in cached]
+
+        return self._load_sequence(int_idx)
     
     def __iter__(self):
         while True:
@@ -64,17 +99,31 @@ class CFDSubDataset(IterableDataset):
 
 
 class CFDDataset:
-    def __init__(self, 
-        metadata_files, batch_sizes, loader_types, start_idx, 
+    def __init__(self,
+        metadata_files, batch_sizes, loader_types, start_idx,
         shuffle=False, split=1.0, flag='train', nodes_per_sample=None,
         collater_transform=None,   # <— add this
+        dataloader_kwargs=None,
+        cache_sequences=False,
     ):
         self.subdatasets = []
         self.dataloaders = []
+        # Keep a single Collater instance so that transforms (e.g. mesh
+        # coarsening) are reused across every time step we collate.
         self.collater = Collater(transform=collater_transform)  # <— use it
+        # Extra keyword arguments allow the caller to tune worker/prefetch
+        # behaviour per-stage (train/val/test) without rewriting this class.
+        self._dataloader_kwargs = dataloader_kwargs or {}
 
         for metadata_file, batch_size, loader_type, start in zip(metadata_files, batch_sizes, loader_types, start_idx):
-            subdataset = CFDSubDataset(metadata_file, start, shuffle, split, flag)
+            subdataset = CFDSubDataset(
+                metadata_file,
+                start,
+                shuffle,
+                split,
+                flag,
+                cache_sequences=cache_sequences,
+            )
             self.subdatasets.append(subdataset)
         
         for subdataset, batch_size, loader_type in zip(self.subdatasets, batch_sizes, loader_types):
@@ -86,6 +135,8 @@ class CFDDataset:
         out = []
         for t in range(seq_len):
             graphs_at_t = [seq[t] for seq in batch]     # List[Data] at time t
+            # Collater knows how to assemble per-time-step graphs into a single
+            # batch while keeping multiscale connectivity consistent.
             batched = self.collater.collate(graphs_at_t)  # <-- Collater fixes multiscale indices and applies transforms
             out.append(batched)
         return out
@@ -96,10 +147,16 @@ class CFDDataset:
         common_kwargs = {
             'batch_size': batch_size,
             'collate_fn': self._sequence_collate,   # <-- uses Collater(transform=...)
+            # Sensible defaults keep backwards compatibility if the caller does
+            # not override worker parameters.
             'num_workers': 1,
             'prefetch_factor': 1
             # DO NOT put 'shuffle' here for IterableDataset
         }
+
+        if self._dataloader_kwargs:
+            # Allow per-instance overrides such as num_workers/prefetch_factor.
+            common_kwargs.update(self._dataloader_kwargs)
 
         if loader_type != 'default':
             raise ValueError(f"Unsupported loader type: {loader_type}")
@@ -132,10 +189,19 @@ class CFDDataset:
 def create_cfd_datamodule(metadata_files, batch_sizes, loader_types, start_idx,
                           shuffle=False, split=1.0, flag='train',
                           nodes_per_sample=None,
-                          collater_transform=None):     # <— add this
+                          collater_transform=None,
+                          dataloader_kwargs=None,
+                          cache_sequences=False):     # <— add this
+    # The helper simply forwards the custom DataLoader kwargs to CFDDataset so
+    # higher-level modules (Lightning data module) can decide how aggressively
+    # to parallelise each stage. ``cache_sequences`` allows validation/test
+    # loops to trade memory for significantly lower data_step_time by reusing
+    # preprocessed sequences.
     return CFDDataset(metadata_files, batch_sizes, loader_types, start_idx,
                       shuffle, split, flag, nodes_per_sample,
-                      collater_transform=collater_transform)
+                      collater_transform=collater_transform,
+                      dataloader_kwargs=dataloader_kwargs,
+                      cache_sequences=cache_sequences)
 
 
 @torch.no_grad()

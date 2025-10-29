@@ -134,22 +134,59 @@ class cfd_datamodule(L.LightningDataModule):
             ),
         ])
 
+        cpu_count = os.cpu_count() or 1
+        # Validation tends to benefit from more workers because it cannot hide
+        # latency behind backprop; train uses roughly half to leave room for the
+        # training loop itself.
+        train_workers = max(1, min(8, cpu_count // 2 or 1))
+        val_workers = max(1, min(8, cpu_count))
+
+        def _loader_kwargs(num_workers: int, *, prefetch_factor: int) -> dict:
+            # Centralised helper so both train/val loaders share the same logic
+            # for enabling worker reuse and pinned memory when available.
+            kwargs = {
+                "num_workers": num_workers,
+                "prefetch_factor": prefetch_factor,
+            }
+            if num_workers > 0:
+                kwargs["persistent_workers"] = True
+            if torch.cuda.is_available():
+                kwargs["pin_memory"] = True
+            return kwargs
+
+        train_loader_kwargs = _loader_kwargs(train_workers, prefetch_factor=2)
+        val_loader_kwargs = _loader_kwargs(val_workers, prefetch_factor=4 if val_workers > 1 else 2)
+
+        # Emit the final settings in the log so we can correlate them with
+        # measured data_step_time changes when running experiments.
+        log.info(f"Train DataLoader kwargs: {train_loader_kwargs}")
+        log.info(f"Val DataLoader kwargs: {val_loader_kwargs}")
+
         if stage == "fit":
             self.train_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=True, split=self.split, flag='train',
-                collater_transform=self.graph_transform
+                collater_transform=self.graph_transform,
+                dataloader_kwargs=train_loader_kwargs,
+                cache_sequences=False,
             )
             self.val_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=False, split=self.split, flag='val',
-                collater_transform=self.graph_transform
+                collater_transform=self.graph_transform,
+                dataloader_kwargs=val_loader_kwargs,
+                # Validation/test reuse a deterministic index order. Enable the
+                # dataset-level cache so we only pay the HDF5 + SymPy cost once
+                # per sequence and serve clones on subsequent epochs.
+                cache_sequences=True,
             )
         if stage in {"test", "predict"}:
             self.val_cfd_datamodule = create_cfd_datamodule(
                 self.metadata_files, self.batch_sizes, self.loader_types, self.start_idx,
                 shuffle=False, split=self.split, flag='val',
-                collater_transform=self.graph_transform
+                collater_transform=self.graph_transform,
+                dataloader_kwargs=val_loader_kwargs,
+                cache_sequences=True,
             )
 
     def train_dataloader(self):
