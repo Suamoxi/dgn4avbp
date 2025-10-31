@@ -139,8 +139,8 @@ class cfd_datamodule(L.LightningDataModule):
         # Validation tends to benefit from more workers because it cannot hide
         # latency behind backprop; train uses roughly half to leave room for the
         # training loop itself.
-        train_workers = max(1, min(8, cpu_count // 2 or 1))
-        val_workers = max(1, min(8, cpu_count))
+        train_workers = 1
+        val_workers = 1
 
         def _loader_kwargs(num_workers: int, *, prefetch_factor: int) -> dict:
             # Centralised helper so both train/val loaders share the same logic
@@ -175,6 +175,7 @@ class cfd_datamodule(L.LightningDataModule):
                 shuffle=False, split=self.split, flag='val',
                 collater_transform=self.graph_transform,
                 dataloader_kwargs=val_loader_kwargs,
+                cache_sequences=True
             )
         if stage in {"test", "predict"}:
             self.val_cfd_datamodule = create_cfd_datamodule(
@@ -182,6 +183,7 @@ class cfd_datamodule(L.LightningDataModule):
                 shuffle=False, split=self.split, flag='val',
                 collater_transform=self.graph_transform,
                 dataloader_kwargs=val_loader_kwargs,
+                cache_sequences=True
             )
 
     def train_dataloader(self):
@@ -399,16 +401,16 @@ if prog_bar is not None:
     _callbacks.insert(0, prog_bar)
 
 trainer = L.Trainer(
-    max_epochs=1,
+    max_epochs=5000,
     accelerator="auto",
     precision="16-mixed",
     callbacks=_callbacks,
     logger=[csv_logger, tb_logger],
     enable_progress_bar=(prog_bar is not None),
     log_every_n_steps=1,
-    limit_val_batches=40,
-    limit_train_batches=160,
-    accumulate_grad_batches=1,
+    limit_val_batches=4,
+    limit_train_batches=16,
+    accumulate_grad_batches=4,
     gradient_clip_val=1.0,
     default_root_dir=LOG_DIR,
     profiler=SimpleProfiler()
@@ -417,7 +419,7 @@ trainer = L.Trainer(
 # =========================
 # (Optional) resume
 # =========================
-#ckpt_path = "/scratch/coop/theret/nn4avbp/logs/train_dgn4avbp_74059/checkpoints/last.ckpt"
+ckpt_path = "/scratch/coop/theret/nn4avbp/logs/train_dgn4avbp_74839/checkpoints/last.ckpt"
 ckpt_path = None
 if ckpt_path and not os.path.isabs(ckpt_path):
     ckpt_path = os.path.abspath(ckpt_path)
@@ -431,6 +433,8 @@ else:
 # =========================
 # GO
 # =========================
+print(ckpt_path)
+
 if ckpt_path is None:
     trainer.fit(lit, dm)
 else:
