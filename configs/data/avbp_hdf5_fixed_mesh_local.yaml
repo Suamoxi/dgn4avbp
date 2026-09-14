@@ -1,0 +1,22 @@
+# D1 fixed-mesh HIT data contract.
+# Mirrors diffusion4avbp/configs/data/avbp_hdf5_fixed_mesh_local.yaml.
+name: avbp_hdf5_fixed_mesh
+files: []
+data_dir: /scratch/coop/theret/HIT_LES_FORCED/RUN/SOLUT
+file_pattern: "*.h5"
+recursive: true
+mesh_file: /scratch/coop/theret/HIT_LES_FORCED/MESH/mesh.mesh.h5
+channel_paths:
+  - GaseousPhase/rho
+  - GaseousPhase/rhou
+  - GaseousPhase/rhov
+  - GaseousPhase/rhow
+  - GaseousPhase/rhoE
+coord_paths:
+  - Coordinates/x
+  - Coordinates/y
+  - Coordinates/z
+connectivity_path: Connectivity/hex->node
+variable_mesh: false
+
+# D2/D3 intentionally own split and scaling. They are not performed in D1.
