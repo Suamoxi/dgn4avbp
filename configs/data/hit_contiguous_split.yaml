@@ -1,0 +1,8 @@
+# D2 train/validation/test split contract for the single HIT trajectory.
+strategy: contiguous_by_snapshot_iteration
+train_ratio: 0.8
+val_ratio: 0.1
+test_ratio: 0.1
+
+# The exact file assignment is materialized in artifacts/d2_split_manifest.json.
+# No random permutation is used.
