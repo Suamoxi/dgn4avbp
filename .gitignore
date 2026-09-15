@@ -5,6 +5,7 @@ checkpoints/
 *.vtk
 *.h5
 *.npz
+artifacts/
 # IDE + OS junk
 __pycache__/
 *.log
