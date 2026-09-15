@@ -29,6 +29,12 @@ echo "Git branch: $(git branch --show-current)"
 echo "Git commit: $(git rev-parse HEAD)"
 echo "========================================"
 
+if [ ! -f "${PROJECT}/artifacts/d2_split_manifest.json" ]; then
+  echo "ERROR: frozen D2 manifest is missing: ${PROJECT}/artifacts/d2_split_manifest.json" >&2
+  echo "Run the validated D2 job first; D3 will not regenerate the split automatically." >&2
+  exit 1
+fi
+
 echo
 echo "========================================"
 echo "STEP 1 - D1 + D2 + D3 unit tests"
@@ -47,23 +53,7 @@ singularity exec \
 
 echo
 echo "========================================"
-echo "STEP 2 - Verify frozen D2 manifest against current data"
-echo "========================================"
-
-singularity exec \
-  -B /home \
-  -B /scratch \
-  ${IMAGE} \
-  env PYTHONPATH=${PROJECT} \
-  ${PYTHON} \
-  -u ${PROJECT}/scripts/create_d2_split.py \
-  --data-config ${PROJECT}/configs/data/avbp_hdf5_fixed_mesh_local.yaml \
-  --split-config ${PROJECT}/configs/data/hit_contiguous_split.yaml \
-  --manifest ${PROJECT}/artifacts/d2_split_manifest.json
-
-echo
-echo "========================================"
-echo "STEP 3 - Fit and validate D3 preprocessing"
+echo "STEP 2 - Validate frozen D2 and fit D3 preprocessing"
 echo "========================================"
 
 singularity exec \
