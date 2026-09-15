@@ -1,9 +1,11 @@
 # D1 fixed-mesh HIT data contract.
-# Mirrors diffusion4avbp/configs/data/avbp_hdf5_fixed_mesh_local.yaml.
+# Mirrors the physical fields/mesh paths used by diffusion4avbp, while selecting
+# only numbered solution snapshots. `last_solution.h5` is excluded because it is
+# a byte-identical alias of `solut_hit_00013342.h5` in this HIT dataset.
 name: avbp_hdf5_fixed_mesh
 files: []
 data_dir: /scratch/coop/theret/HIT_LES_FORCED/RUN/SOLUT
-file_pattern: "*.h5"
+file_pattern: "solut_hit_*.h5"
 recursive: true
 mesh_file: /scratch/coop/theret/HIT_LES_FORCED/MESH/mesh.mesh.h5
 channel_paths:
