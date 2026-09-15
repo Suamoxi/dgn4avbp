@@ -90,7 +90,7 @@ def test_extra_opposite_face_edge_is_rejected() -> None:
     dataset.edge_index = torch.cat([dataset.edge_index, extra], dim=1)
     dataset.edge_attr = dataset.pos[dataset.edge_index[1]] - dataset.pos[dataset.edge_index[0]]
 
-    with pytest.raises(AssertionError, match="directed nonperiodic Cartesian edges"):
+    with pytest.raises(AssertionError, match="does not match the validated native hexahedral graph"):
         validate_native_hit_topology(dataset, L_ref=2.0)
 
 
