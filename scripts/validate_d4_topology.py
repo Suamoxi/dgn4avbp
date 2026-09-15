@@ -59,6 +59,14 @@ def main() -> None:
     validate_split_manifest(split_manifest, dataset.files)
     validate_preprocessing_manifest(preprocessing_manifest, split_manifest)
 
+    frozen_reference_cfg = preprocessing_manifest["physical_nondimensionalization"][
+        "reference_config"
+    ]
+    if frozen_reference_cfg != reference_cfg:
+        raise ValueError(
+            "Current HIT reference config differs from the reference config frozen in the D3 manifest."
+        )
+
     refs = HITReferenceScales.from_config(reference_cfg)
     manifest = validate_native_hit_topology(dataset, L_ref=refs.L_ref)
 
@@ -86,6 +94,7 @@ def main() -> None:
     manifest["d3_fit_file_fingerprint_sha256"] = preprocessing_manifest[
         "fit_file_fingerprint_sha256"
     ]
+    manifest["d3_reference_config_matches_current"] = True
     manifest["d3_geometry_consistency"] = {
         "coordinates_equal_raw_over_L_ref": True,
         "edge_attr_equal_raw_over_L_ref": True,
@@ -122,6 +131,7 @@ def main() -> None:
         f"{manifest['local_hex_edge_mappings']['same_global_directed_edge_set']}"
     )
     print(f"periodic closure added: {manifest['periodic_closure_added']}")
+    print("D3 reference config matches current: True")
     print(f"manifest: {Path(args.manifest).resolve()}")
 
 
