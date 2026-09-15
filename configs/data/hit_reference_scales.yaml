@@ -1,0 +1,46 @@
+case_id: HIT_LES_FORCED
+reference_scheme: hit_target_rms_box_reference
+
+references:
+  rho_ref:
+    value: 1.17
+    units: kg/m^3
+    definition: reference_air_density_at_300K_and_ambient_pressure
+    provenance: HIT LES simulation setup
+    inference_available: true
+
+  U_ref:
+    value: 17.360947554785138
+    units: m/s
+    definition: prescribed_target_one_component_rms_velocity
+    provenance: HIT LES simulation setup
+    inference_available: true
+    derivation: Ma_target * sqrt(gamma * R * T_ref)
+
+  L_ref:
+    value: 0.0005668079275737893
+    units: m
+    definition: periodic_box_side_length
+    provenance: HIT LES simulation setup
+    inference_available: true
+
+  T_ref:
+    value: 300.0
+    units: K
+    definition: prescribed_initial_reference_temperature
+    provenance: HIT LES simulation setup
+    inference_available: true
+
+regime:
+  Re_lambda_target:
+    value: 37.0
+    definition: prescribed_target_Taylor_microscale_Reynolds_number
+    provenance: HIT LES forcing setup
+    inference_available: true
+
+  Ma_target:
+    value: 0.05
+    definition: target_rms_velocity_over_reference_speed_of_sound
+    provenance: HIT LES forcing setup
+    inference_available: true
+    derivation: U_ref / sqrt(gamma * R * T_ref)
