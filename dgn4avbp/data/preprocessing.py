@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import torch
 import yaml
@@ -260,13 +260,19 @@ def build_preprocessing_manifest(
     standardizer: ChannelStandardizer,
 ) -> dict:
     train_files = split_manifest["files"]["train"]
+    if standardizer.num_fit_samples != len(train_files):
+        raise ValueError(
+            "Standardizer fit count does not match the D2 training split: "
+            f"{standardizer.num_fit_samples} != {len(train_files)}."
+        )
+
     return {
         "version": 1,
         "case_id": reference_config.get("case_id"),
         "reference_scheme": reference_config.get("reference_scheme"),
         "dataset_fingerprint_sha256": split_manifest["ordered_file_fingerprint_sha256"],
         "fit_split": "train",
-        "fit_num_samples": len(train_files),
+        "fit_num_samples": standardizer.num_fit_samples,
         "fit_file_fingerprint_sha256": file_list_fingerprint(train_files),
         "channel_names": list(STATE_CHANNEL_NAMES),
         "physical_nondimensionalization": {
