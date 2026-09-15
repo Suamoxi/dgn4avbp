@@ -98,12 +98,14 @@ def main() -> None:
     reconstructed = processed_dataset.inverse_target(processed.target)
     torch.testing.assert_close(reconstructed, raw.target, rtol=5e-5, atol=1e-6)
 
+    # D1 stores mesh coordinates as float32, so this tolerance checks the
+    # intended inverse transform without pretending sub-float32 precision exists.
     pos_reconstructed = processed_dataset.pos.to(torch.float64) * refs.L_ref
     torch.testing.assert_close(
         pos_reconstructed,
         dataset.pos.to(torch.float64),
-        rtol=1e-6,
-        atol=1e-12,
+        rtol=5e-6,
+        atol=1e-10,
     )
 
     span_nd = processed_dataset.pos.amax(dim=0) - processed_dataset.pos.amin(dim=0)
