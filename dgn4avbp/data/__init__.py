@@ -34,6 +34,19 @@ from .splits import (
     validate_split_manifest,
     write_split_manifest,
 )
+from .topology import (
+    LEGACY_AVBP_HEX_EDGES,
+    build_hex_edge_index,
+    canonical_local_edge_set,
+    degree_histogram,
+    directed_edge_sets_equal,
+    edge_geometry_metrics,
+    expected_nonperiodic_cartesian_degree_histogram,
+    expected_nonperiodic_cartesian_directed_edges,
+    infer_cartesian_grid,
+    validate_native_hit_topology,
+    write_topology_manifest,
+)
 
 __all__ = [
     "AVBPHDF5FixedMeshDataset",
@@ -66,4 +79,15 @@ __all__ = [
     "split_indices_from_manifest",
     "validate_split_manifest",
     "write_split_manifest",
+    "LEGACY_AVBP_HEX_EDGES",
+    "build_hex_edge_index",
+    "canonical_local_edge_set",
+    "degree_histogram",
+    "directed_edge_sets_equal",
+    "edge_geometry_metrics",
+    "expected_nonperiodic_cartesian_degree_histogram",
+    "expected_nonperiodic_cartesian_directed_edges",
+    "infer_cartesian_grid",
+    "validate_native_hit_topology",
+    "write_topology_manifest",
 ]
