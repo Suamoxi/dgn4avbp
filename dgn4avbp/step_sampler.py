@@ -72,7 +72,12 @@ class ImportanceStepSampler(StepSampler):
         rs:     torch.Tensor,
         losses: torch.Tensor
     ) -> None:
-        for r, loss in zip(rs, losses):
+        # The sampler history is intentionally kept in NumPy, matching the
+        # Improved-DDPM reference implementation. Convert device tensors once
+        # before indexing those arrays so the training path also works on CUDA.
+        rs_cpu = rs.detach().cpu().tolist()
+        losses_cpu = losses.detach().cpu().tolist()
+        for r, loss in zip(rs_cpu, losses_cpu):
             if self._loss_counts[r] == self.min_history_length:
                 # Shift out the oldest loss term.
                 self._loss_history[r, :-1] = self._loss_history[r, 1:]
