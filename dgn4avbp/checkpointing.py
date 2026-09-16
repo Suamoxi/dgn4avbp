@@ -136,20 +136,24 @@ def load_training_checkpoint(
             f"Unsupported checkpoint version {version}; expected {CHECKPOINT_VERSION}."
         )
 
+    scheduler_state = checkpoint.get("scheduler")
+    if (scheduler_state is None) != (scheduler is None):
+        raise ValueError(
+            "Scheduler presence does not match the checkpoint contract."
+        )
+    scaler_state = checkpoint.get("scaler")
+    if (scaler_state is None) != (scaler is None):
+        raise ValueError(
+            "AMP scaler presence does not match the checkpoint contract."
+        )
+
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
     step_sampler.load_state_dict(checkpoint["step_sampler"])
 
-    scheduler_state = checkpoint.get("scheduler")
     if scheduler_state is not None:
-        if scheduler is None:
-            raise ValueError("Checkpoint contains scheduler state but no scheduler was provided.")
         scheduler.load_state_dict(scheduler_state)
-
-    scaler_state = checkpoint.get("scaler")
     if scaler_state is not None:
-        if scaler is None:
-            raise ValueError("Checkpoint contains AMP scaler state but no scaler was provided.")
         scaler.load_state_dict(scaler_state)
 
     if restore_rng:
