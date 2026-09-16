@@ -1,0 +1,41 @@
+name: dgn_hit_distribution
+
+# Post-processing only. This benchmark never reruns training or sampling.
+training_config: configs/training/dgn_hit_baseline.yaml
+generation_dir: runs/dgn_hit_baseline/generated
+output_dir: runs/dgn_hit_baseline/benchmark
+
+reference_split: test
+state_space: nondimensional
+comparison_mode: unpaired_population
+
+quantiles: [0.01, 0.05, 0.50, 0.95, 0.99]
+max_pooled_values: 500000
+
+spectra:
+  enabled: true
+  kind: isotropic_3d_kinetic_energy
+  subtract_velocity_mean: true
+  periodic_endpoint_handling: drop_max_coordinate_plane_on_each_axis
+  radial_range: "0 < k <= k_nyquist_min"
+  primary_coordinates: [k_Lref, k_per_m]
+  secondary_coordinate: k_over_k_nyquist
+  bands:
+    low: [0.00, 0.25]
+    mid: [0.25, 0.50]
+    high: [0.50, 1.00]
+
+physics:
+  rho_floor: 1.0e-8
+  report_density_positivity: true
+  report_internal_energy_positivity: true
+  report_velocity_statistics: true
+  report_tke: true
+  report_isotropy_rms_ratio: true
+
+outputs:
+  summary: summary.json
+  channel_metrics: channel_metrics.csv
+  physical_metrics: physical_metrics.csv
+  spectra: spectra.csv
+  spectral_bands: spectral_bands.csv
