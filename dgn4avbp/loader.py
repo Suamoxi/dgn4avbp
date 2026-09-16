@@ -1,15 +1,25 @@
 from typing import List
+
 import torch.utils.data
-from torch_geometric.data import Data, Batch
+from torch_geometric.data import Batch, Data
 from torchvision import transforms
 
+
 class Collater(object):
+    """Collate physical graphs with the multiscale indices expected by DGN.
+
+    PyG already increments every attribute whose name contains ``index`` by the
+    cumulative number of fine-level nodes. Therefore, for ``edge_index_L`` we
+    only pre-compensate by
+
+        cumulative_nodes_L - cumulative_nodes_1
+
+    so PyG's native increment leaves the final indices in the level-L node
+    space. Parent maps ``idx{L-1}_to_idx{L}`` do not contain ``index`` and thus
+    require the complete cumulative level-L offset explicitly. ``batch_L`` is
+    handled natively by PyG because its key contains ``batch``.
     """
-    Collate that correctly offsets multi-scale indices:
-      - edge_index_k        (k >= 2) : + cumulative #nodes at level k
-      - idx{k-1}_to_idx{k}  (k >= 2) : + cumulative #nodes at level k
-      - batch_k             (k >= 2) : + graph_id (0..B-1) so it behaves like PyG's .batch
-    """
+
     def __init__(self, transform: transforms.Compose = None):
         self.transform = transform
 
@@ -17,50 +27,54 @@ class Collater(object):
         if len(batch) == 0:
             return None
 
-        # --- prepare per-level node offsets and graph-id counter ---
-        # For each level k>=2, offsets[k] = total #nodes at level k in all *previous* graphs
-        level_node_offsets = {}   # dict[int -> int]
-        graph_id = 0              # this will be added to batch_k
-
-        # probe how many levels exist from the first elem
         elem = batch[0]
         max_level = 1
-        while hasattr(elem, f'edge_index_{max_level+1}'):
+        while hasattr(elem, f"edge_index_{max_level + 1}"):
             max_level += 1
 
-        # --- walk through the graphs in the incoming mini-batch ---
-        for i, g in enumerate(batch):
-            # initialize offsets for all levels seen so far
-            for L in range(2, max_level+1):
-                if L not in level_node_offsets:
-                    level_node_offsets[L] = 0
+        for graph in batch:
+            for level in range(2, max_level + 1):
+                required = (
+                    f"pos_{level}",
+                    f"edge_index_{level}",
+                    f"idx{level - 1}_to_idx{level}",
+                    f"batch_{level}",
+                )
+                missing = [name for name in required if not hasattr(graph, name)]
+                if missing:
+                    raise ValueError(
+                        f"All graphs in a hierarchy batch must expose the same levels; "
+                        f"missing {missing}."
+                    )
+            if hasattr(graph, f"edge_index_{max_level + 1}"):
+                raise ValueError("All graphs in a hierarchy batch must expose the same number of levels.")
 
-            # shift all multi-scale tensors for this graph
-            for L in range(2, max_level+1):
-                # edge_index_L lives in the index space of level-L nodes -> add node offset at L
-                ek = f'edge_index_{L}'
-                if hasattr(g, ek):
-                    setattr(g, ek, getattr(g, ek) + level_node_offsets[L])
+        # Correct hierarchy indices before delegating the actual concatenation
+        # to PyG. Graph 0 needs no correction; cumulative counts describe all
+        # previously seen graphs.
+        for level in range(2, max_level + 1):
+            cumulative_fine_nodes = int(elem.num_nodes)
+            cumulative_level_nodes = int(getattr(elem, f"pos_{level}").size(0))
 
-                # idx{L-1}_to_idx{L} maps level-(L-1) nodes to level-L nodes -> shift values by offset at L
-                mk = f'idx{L-1}_to_idx{L}'
-                if hasattr(g, mk):
-                    setattr(g, mk, getattr(g, mk) + level_node_offsets[L])
+            for graph in batch[1:]:
+                edge_key = f"edge_index_{level}"
+                parent_key = f"idx{level - 1}_to_idx{level}"
 
-                # batch_L is per-node graph id at level L -> bump by current graph_id
-                bk = f'batch_{L}'
-                if hasattr(g, bk):
-                    setattr(g, bk, getattr(g, bk) + graph_id)
+                # PyG will subsequently add cumulative_fine_nodes because
+                # ``edge_index`` contains the substring "index".
+                edge_compensation = cumulative_level_nodes - cumulative_fine_nodes
+                setattr(graph, edge_key, getattr(graph, edge_key) + edge_compensation)
 
-            # after shifting, update the cumulative node counts for each level
-            for L in range(2, max_level+1):
-                pk = f'pos_{L}'
-                if hasattr(g, pk):
-                    level_node_offsets[L] += int(getattr(g, pk).size(0))
+                # ``idx...`` does not trigger PyG's index increment heuristic.
+                setattr(
+                    graph,
+                    parent_key,
+                    getattr(graph, parent_key) + cumulative_level_nodes,
+                )
 
-            graph_id += 1
+                cumulative_fine_nodes += int(graph.num_nodes)
+                cumulative_level_nodes += int(getattr(graph, f"pos_{level}").size(0))
 
-        # --- hand over to PyG; it will handle level-1 (.edge_index and .batch) automatically ---
         out = Batch.from_data_list(batch)
         return self.transform(out) if self.transform is not None else out
 
@@ -69,8 +83,22 @@ class Collater(object):
 
 
 class DataLoader(torch.utils.data.DataLoader):
-    """ PyG-like DataLoader using the custom Collater above. """
-    def __init__(self, dataset, batch_size=1, shuffle=False, transform: transforms.Compose=None, **kwargs):
+    """PyG-like DataLoader using the hierarchy-aware ``Collater`` above."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        transform: transforms.Compose = None,
+        **kwargs,
+    ):
         if "collate_fn" in kwargs:
             del kwargs["collate_fn"]
-        super().__init__(dataset, batch_size, shuffle, collate_fn=Collater(transform), **kwargs)
+        super().__init__(
+            dataset,
+            batch_size,
+            shuffle,
+            collate_fn=Collater(transform),
+            **kwargs,
+        )
