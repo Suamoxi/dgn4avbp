@@ -92,6 +92,7 @@ with open(path) as f:
     m = json.load(f)
 
 fwd = m["forward_validation"]
+num = fwd["numerical_comparison"]
 print("contract:", m["contract"])
 print("validated batch size:", m["computational_batch_size_validated"])
 print("sample ids:", m["sample_ids"])
@@ -100,11 +101,16 @@ print("selected model levels:", m["model_selected_hierarchy_levels"])
 print("parent maps preserve graph identity:", m["parent_maps_preserve_graph_identity"])
 print("cells preserve graph identity:", m["cell_connectivity_preserves_graph_identity"])
 print("deterministic validation batching invariant:", m["deterministic_validation_batching_invariant"])
+print("structural batching valid:", fwd["structural_batching_valid"])
 print("epsilon shape:", fwd["epsilon_shape"])
 print("variance shape:", fwd["variance_shape"])
-print("batched matches independent:", fwd["batched_matches_independent"])
-print("epsilon max abs difference:", fwd["epsilon_max_abs_difference"])
-print("variance max abs difference:", fwd["variance_max_abs_difference"])
+print("numerical equivalence passed:", num["passed"])
+print("max epsilon NRMSE:", num["max_epsilon_nrmse"])
+print("allowed epsilon NRMSE:", num["epsilon_allowed_nrmse"])
+print("max variance NRMSE:", num["max_variance_nrmse"])
+print("allowed variance NRMSE:", num["variance_allowed_nrmse"])
+print("epsilon / repeat NRMSE ratio:", num["epsilon_to_repeat_nrmse_ratio"])
+print("variance / repeat NRMSE ratio:", num["variance_to_repeat_nrmse_ratio"])
 print("peak CUDA memory bytes:", fwd["peak_cuda_memory_bytes"])
 PY
 
