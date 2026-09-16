@@ -1,0 +1,16 @@
+# D5 fixed-mesh multiscale hierarchy contract.
+algorithm: guillard
+
+# Build the complete usable hierarchy instead of assuming the historical
+# five-scale choice. D6 will select a prefix after inspecting N_l and E_l.
+max_levels: null
+
+# Preserve all pooled connectivity for the baseline. Degree pruning can be
+# studied later as an explicit ablation.
+max_indegree: null
+
+# Geometry is inherited from D3: x* = x / L_ref.
+# No h-based or per-level rescaling is applied.
+geometry_convention: nondimensional_by_L_ref_no_level_rescaling
+scalar_rel_pos: false
+periodic_closure_added: false
