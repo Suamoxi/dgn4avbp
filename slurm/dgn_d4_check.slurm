@@ -48,7 +48,7 @@ singularity exec \
 
 echo
 echo "========================================"
-echo "STEP 2 - Validate native HIT topology"
+echo "STEP 2 - Validate native mesh topology"
 echo "========================================"
 
 singularity exec \
@@ -80,30 +80,43 @@ path = "/scratch/coop/theret/dgn4avbp/artifacts/d4_topology_manifest.json"
 with open(path) as f:
     m = json.load(f)
 
-grid = m["cartesian_grid"]
 geom = m["edge_geometry"]
 maps = m["local_hex_edge_mappings"]
+diag = m["optional_diagnostics"]["hit_cartesian"]
 
+print("topology contract:", m["topology_contract"])
 print("mesh:", m["mesh_id"])
 print("nodes:", m["num_nodes"])
 print("cells:", m["num_cells"])
 print("directed edges:", m["num_directed_edges"])
-print("axis counts:", grid["axis_counts"])
-print("physical span:", grid["axis_span"])
-print("physical spacing:", grid["axis_spacing"])
-print("nondimensional span:", grid["nondimensional_span"])
-print("nondimensional spacing:", grid["nondimensional_spacing"])
-print("degree histogram:", m["degree_histogram"])
-print("nearest-neighbor fraction:", geom["nearest_neighbor_fraction"])
-print("cross-box edges:", geom["cross_box_edges"])
-print("opposite-face edges:", geom["opposite_face_edges"])
+print("spatial dim:", m["spatial_dim"])
+print("core validation:", m["core_validation"])
+print("degree histogram:", m["degree_histogram"]["observed"])
+print("generic edge geometry:", geom)
 print("local mapping equivalent:", maps["same_undirected_local_edge_set"])
 print("global graph equivalent:", maps["same_global_directed_edge_set"])
 print("periodic closure added:", m["periodic_closure_added"])
 print("D3 geometry consistency:", m["d3_geometry_consistency"])
+print("HIT Cartesian diagnostic status:", diag["status"])
+
+if diag["status"] == "passed":
+    grid = diag["cartesian_grid"]
+    dgeom = diag["edge_geometry"]
+    print("diagnostic axis counts:", grid["axis_counts"])
+    print("diagnostic physical span:", grid["axis_span"])
+    print("diagnostic physical spacing:", grid["axis_spacing"])
+    print("diagnostic nondimensional span:", grid["nondimensional_span"])
+    print("diagnostic nondimensional spacing:", grid["nondimensional_spacing"])
+    print("diagnostic degree histogram:", diag["degree_histogram"])
+    print("diagnostic nearest-neighbor fraction:", dgeom["nearest_neighbor_fraction"])
+    print("diagnostic cross-box edges:", dgeom["cross_box_edges"])
+    print("diagnostic opposite-face edges:", dgeom["opposite_face_edges"])
+else:
+    print("diagnostic error:", f"{diag['error_type']}: {diag['message']}")
+    print("diagnostic failure is non-fatal for the D4 core contract")
 PY
 
 echo
 echo "========================================"
-echo "ALL D0-D4 CHECKS PASSED"
+echo "ALL D0-D4 CORE CHECKS PASSED"
 echo "========================================"
