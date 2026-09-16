@@ -38,7 +38,11 @@ def restore_rng_state(
 
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch_cpu"])
+
+    # ``torch.load(..., map_location="cuda")`` also moves serialized RNG-state
+    # tensors to CUDA. PyTorch RNG setters require CPU ByteTensors, so normalize
+    # them back to CPU before applying the saved state.
+    torch.set_rng_state(state["torch_cpu"].detach().cpu())
 
     cuda_state = state.get("torch_cuda")
     if cuda_state is not None:
@@ -50,7 +54,7 @@ def restore_rng_state(
             raise RuntimeError(
                 "Checkpoint CUDA RNG-state count does not match the current CUDA device count."
             )
-        torch.cuda.set_rng_state_all(cuda_state)
+        torch.cuda.set_rng_state_all([rng.detach().cpu() for rng in cuda_state])
 
     generator_state = state.get("data_generator")
     if generator_state is not None:
@@ -58,7 +62,7 @@ def restore_rng_state(
             raise ValueError(
                 "Checkpoint contains data-generator RNG state but no generator was provided."
             )
-        data_generator.set_state(generator_state)
+        data_generator.set_state(generator_state.detach().cpu())
 
 
 def build_training_checkpoint(
