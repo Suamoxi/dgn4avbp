@@ -1,0 +1,44 @@
+name: improved_ddpm_hit
+
+# Physical-space DGN baseline. This intentionally follows the original DGN4CFD
+# 1000-step linear schedule before any cosine/schedule ablation.
+num_steps: 1000
+schedule_type: linear
+beta_start: 0.0001
+beta_end: 0.02
+max_beta: 0.999
+
+prediction: epsilon
+variance: learned_range
+learnable_variance: true
+
+# Eq. (16) of Improved-DDPM: L_hybrid = L_simple + lambda * L_vlb.
+# L_vlb is a SUM over diffusion steps. With sampled timesteps and the training
+# importance weight 1/(T p(t)), the per-sampled-step VLB multiplier is
+# lambda_vlb * T = 1.0 for T=1000.
+lambda_vlb: 0.001
+sampled_vlb_multiplier: 1.0
+
+# The existing DGN backbone receives the integer diffusion index directly.
+# For T=1000 this is numerically the same 0..999 scale used by OpenAI when
+# timestep rescaling targets 1000.
+timestep_embedding:
+  input: raw_integer_index
+  min: 0
+  max: 999
+  rescale_to_1000: false
+
+continuous_state_likelihood:
+  t0_decoder: gaussian_nll
+  units: bits_per_dimension
+  discretized_image_likelihood: false
+
+sampling:
+  method: ancestral_ddpm
+  suppress_noise_at_t0: true
+
+scientific_scope:
+  unconditional: true
+  physical_space: true
+  state_channels: 5
+  periodicity_added: false
