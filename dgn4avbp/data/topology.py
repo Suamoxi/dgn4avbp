@@ -75,30 +75,101 @@ def _close(value: float, expected: float, *, rtol: float = 1e-4, atol: float = 1
     return math.isclose(value, expected, rel_tol=rtol, abs_tol=atol)
 
 
+def _cluster_axis_coordinate_values(values: torch.Tensor) -> tuple[torch.Tensor, dict]:
+    """Merge numerically duplicated coordinate planes.
+
+    AVBP mesh coordinates are loaded as float32. A nominal Cartesian plane can
+    therefore occasionally appear as two exact floating-point values separated
+    by round-off, even though both values represent the same physical plane.
+    Exact ``torch.unique`` would incorrectly count those as distinct grid
+    coordinates.
+
+    We first obtain exact unique values and then merge only gaps smaller than
+    1e-4 of the largest axis gap (with a machine-precision floor). This is four
+    orders of magnitude below one native cell width for the uniform HIT mesh,
+    while being comfortably above float32 representation noise. The later D4
+    uniform-spacing and edge-geometry checks remain responsible for rejecting a
+    genuinely non-Cartesian or nonuniform mesh.
+    """
+
+    if values.ndim != 1:
+        raise ValueError(f"Expected one-dimensional axis coordinates, got {tuple(values.shape)}.")
+    if not torch.is_floating_point(values):
+        raise ValueError("Axis coordinates must be floating point.")
+
+    values64 = values.to(torch.float64)
+    exact_values, exact_counts = torch.unique(values64, sorted=True, return_counts=True)
+    if exact_values.numel() < 2:
+        raise ValueError("Axis contains fewer than two unique coordinate values.")
+
+    exact_diffs = torch.diff(exact_values)
+    if not torch.all(exact_diffs > 0):
+        raise ValueError("Exact unique axis coordinates are not strictly increasing.")
+
+    max_gap = float(exact_diffs.max().item())
+    source_eps = torch.finfo(values.dtype).eps
+    coordinate_scale = max(
+        abs(float(exact_values[0].item())),
+        abs(float(exact_values[-1].item())),
+        max_gap,
+    )
+    merge_tolerance = max(
+        max_gap * 1e-4,
+        16.0 * source_eps * coordinate_scale,
+    )
+
+    new_group = exact_diffs > merge_tolerance
+    group_ids = torch.zeros(exact_values.numel(), dtype=torch.long, device=values.device)
+    if new_group.numel() > 0:
+        group_ids[1:] = torch.cumsum(new_group.to(torch.long), dim=0)
+    num_groups = int(group_ids[-1].item()) + 1
+
+    weighted_sum = torch.zeros(num_groups, dtype=torch.float64, device=values.device)
+    total_weight = torch.zeros(num_groups, dtype=torch.float64, device=values.device)
+    counts64 = exact_counts.to(torch.float64)
+    weighted_sum.scatter_add_(0, group_ids, exact_values * counts64)
+    total_weight.scatter_add_(0, group_ids, counts64)
+    centers = weighted_sum / total_weight
+
+    spread = (exact_values - centers[group_ids]).abs()
+    max_cluster_spread = float(spread.max().item()) if spread.numel() else 0.0
+
+    return centers, {
+        "exact_unique_count": int(exact_values.numel()),
+        "merged_unique_count": int(centers.numel()),
+        "merged_exact_values": int(exact_values.numel() - centers.numel()),
+        "merge_tolerance": float(merge_tolerance),
+        "max_cluster_spread": max_cluster_spread,
+    }
+
+
 def infer_cartesian_grid(pos: torch.Tensor) -> dict:
-    """Infer the tensor-product grid dimensions and uniform spacing from coordinates."""
+    """Infer tensor-product grid dimensions and spacing robustly to round-off."""
 
     if pos.ndim != 2 or pos.shape[1] != 3:
         raise ValueError(f"Expected positions [N, 3], got {tuple(pos.shape)}.")
     if not torch.isfinite(pos).all():
         raise ValueError("Mesh positions contain non-finite values.")
 
-    pos64 = pos.to(torch.float64)
     axis_counts: list[int] = []
     axis_min: list[float] = []
     axis_max: list[float] = []
     axis_span: list[float] = []
     axis_spacing: list[float] = []
     axis_spacing_rel_spread: list[float] = []
+    axis_exact_unique_counts: list[int] = []
+    axis_merged_exact_values: list[int] = []
+    axis_coordinate_merge_tolerance: list[float] = []
+    axis_max_coordinate_cluster_spread: list[float] = []
 
     for axis in range(3):
-        values = torch.sort(torch.unique(pos64[:, axis])).values
+        values, diagnostics = _cluster_axis_coordinate_values(pos[:, axis])
         count = int(values.numel())
         if count < 2:
-            raise ValueError(f"Axis {axis} contains fewer than two unique coordinate values.")
+            raise ValueError(f"Axis {axis} contains fewer than two coordinate planes.")
         diffs = torch.diff(values)
         if not torch.all(diffs > 0):
-            raise ValueError(f"Axis {axis} coordinates are not strictly increasing after uniquing.")
+            raise ValueError(f"Axis {axis} coordinates are not strictly increasing after clustering.")
         spacing = float(diffs.mean().item())
         max_dev = float((diffs - spacing).abs().max().item())
         rel_spread = max_dev / spacing
@@ -109,11 +180,15 @@ def infer_cartesian_grid(pos: torch.Tensor) -> dict:
         axis_span.append(float((values[-1] - values[0]).item()))
         axis_spacing.append(spacing)
         axis_spacing_rel_spread.append(rel_spread)
+        axis_exact_unique_counts.append(diagnostics["exact_unique_count"])
+        axis_merged_exact_values.append(diagnostics["merged_exact_values"])
+        axis_coordinate_merge_tolerance.append(diagnostics["merge_tolerance"])
+        axis_max_coordinate_cluster_spread.append(diagnostics["max_cluster_spread"])
 
     expected_nodes = math.prod(axis_counts)
     if expected_nodes != int(pos.shape[0]):
         raise ValueError(
-            "Coordinates do not form a complete tensor-product grid: "
+            "Coordinates do not form a complete tensor-product grid after round-off clustering: "
             f"axis_counts={axis_counts} imply {expected_nodes} nodes, observed {pos.shape[0]}."
         )
 
@@ -124,6 +199,10 @@ def infer_cartesian_grid(pos: torch.Tensor) -> dict:
         "axis_span": axis_span,
         "axis_spacing": axis_spacing,
         "axis_spacing_rel_spread": axis_spacing_rel_spread,
+        "axis_exact_unique_counts": axis_exact_unique_counts,
+        "axis_merged_exact_values": axis_merged_exact_values,
+        "axis_coordinate_merge_tolerance": axis_coordinate_merge_tolerance,
+        "axis_max_coordinate_cluster_spread": axis_max_coordinate_cluster_spread,
     }
 
 
