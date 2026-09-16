@@ -250,8 +250,13 @@ def main() -> None:
     independent_outputs = []
     with torch.no_grad():
         for graph in singles_for_corruption:
-            epsilon, variance = model(graph.to(device))
-            independent_outputs.append((epsilon.cpu(), variance.cpu()))
+            graph_device = deepcopy(graph).to(device)
+            epsilon_single, variance_single = model(graph_device)
+            independent_outputs.append((epsilon_single.cpu(), variance_single.cpu()))
+            del graph_device, epsilon_single, variance_single
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
     batched = batched.to(device)
     fine_edge_index_before = batched.edge_index.clone()
