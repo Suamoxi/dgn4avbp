@@ -58,6 +58,8 @@ For every hierarchy level `L` in a valid batch:
 6. fine-level AVBP cell connectivity remains inside the corresponding graph's
    fine-node range.
 
+These structural invariants are the hard correctness contract for D9.
+
 ## Model equivalence
 
 In `eval()` mode, batching must be purely computational. Given the same model,
@@ -67,13 +69,32 @@ same hierarchy, same diffusion timesteps, and same noisy fields,
 DGN(batch(graph_a, graph_b))
 ```
 
-must equal, up to floating-point tolerance,
+must represent the same operation as
 
 ```text
 concat(DGN(graph_a), DGN(graph_b)).
 ```
 
-This is validated for both the epsilon and learned-range variance heads.
+The CPU unit test verifies this with a tight floating-point tolerance for both
+the epsilon and learned-range variance heads.
+
+On the real CUDA path, PyG scatter reductions and GPU matrix operations are not
+bitwise deterministic. D9 therefore also measures the NRMSE between two
+successive forwards of the **same batched input**. The batched-vs-independent
+NRMSE is accepted when it remains within
+
+```text
+max(1e-5, 2 * same_shape_repeat_NRMSE)
+```
+
+for each output head. This prevents ordinary GPU reduction variability from
+being mistaken for a batching-index error while still rejecting a discrepancy
+that is materially larger than the measured same-shape numerical variability.
+The raw absolute, RMS, normalized RMS, and repeat-comparison values are retained
+in the D9 manifest.
+
+Strict run-to-run reproducibility is not owned by D9; checkpoint/RNG and related
+reproducibility behavior are handled in D11.
 
 ## Deterministic validation
 
