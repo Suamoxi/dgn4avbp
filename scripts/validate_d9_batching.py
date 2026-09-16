@@ -36,7 +36,8 @@ from dgn4avbp.diffusion_process import DiffusionProcess
 from dgn4avbp.loader import Collater
 
 
-NUMERICAL_NRMSE_THRESHOLD = 1.0e-3
+REPEAT_VARIABILITY_FACTOR = 2.0
+MIN_NRMSE_FLOOR = 1.0e-5
 
 
 def parse_args() -> argparse.Namespace:
@@ -322,9 +323,23 @@ def main() -> None:
             }
         )
 
+    epsilon_allowed_nrmse = max(
+        MIN_NRMSE_FLOOR,
+        REPEAT_VARIABILITY_FACTOR * epsilon_repeat_stats["nrmse"],
+    )
+    variance_allowed_nrmse = max(
+        MIN_NRMSE_FLOOR,
+        REPEAT_VARIABILITY_FACTOR * variance_repeat_stats["nrmse"],
+    )
+    epsilon_variability_ratio = epsilon_max_nrmse / max(
+        epsilon_repeat_stats["nrmse"], MIN_NRMSE_FLOOR
+    )
+    variance_variability_ratio = variance_max_nrmse / max(
+        variance_repeat_stats["nrmse"], MIN_NRMSE_FLOOR
+    )
     numerical_equivalence_passed = (
-        epsilon_max_nrmse <= NUMERICAL_NRMSE_THRESHOLD
-        and variance_max_nrmse <= NUMERICAL_NRMSE_THRESHOLD
+        epsilon_max_nrmse <= epsilon_allowed_nrmse
+        and variance_max_nrmse <= variance_allowed_nrmse
     )
 
     peak_memory_bytes = (
@@ -332,7 +347,7 @@ def main() -> None:
     )
 
     manifest = {
-        "version": 2,
+        "version": 3,
         "contract": "hierarchy_aware_multi_sample_batching",
         "dataset_fingerprint_sha256": split_manifest["ordered_file_fingerprint_sha256"],
         "hierarchy_fingerprint_sha256": hierarchy["hierarchy_fingerprint_sha256"],
@@ -358,16 +373,27 @@ def main() -> None:
             "structural_batching_valid": True,
             "numerical_comparison": {
                 "metric": "NRMSE = RMSE(batched-independent) / RMS(independent)",
-                "threshold": NUMERICAL_NRMSE_THRESHOLD,
+                "acceptance": (
+                    "batched-independent NRMSE <= max(minimum_nrmse_floor, "
+                    "repeat_variability_factor * same-shape-repeat NRMSE)"
+                ),
+                "repeat_variability_factor": REPEAT_VARIABILITY_FACTOR,
+                "minimum_nrmse_floor": MIN_NRMSE_FLOOR,
                 "passed": numerical_equivalence_passed,
                 "max_epsilon_nrmse": epsilon_max_nrmse,
                 "max_variance_nrmse": variance_max_nrmse,
+                "epsilon_allowed_nrmse": epsilon_allowed_nrmse,
+                "variance_allowed_nrmse": variance_allowed_nrmse,
+                "epsilon_to_repeat_nrmse_ratio": epsilon_variability_ratio,
+                "variance_to_repeat_nrmse_ratio": variance_variability_ratio,
                 "per_graph": per_graph_numerics,
                 "same_shape_repeat_epsilon": epsilon_repeat_stats,
                 "same_shape_repeat_variance": variance_repeat_stats,
                 "note": (
-                    "GPU scatter/GEMM reductions may differ at roundoff level when the same "
-                    "disconnected graphs are evaluated independently versus as one larger batch."
+                    "The structural batching invariants are the hard correctness contract. "
+                    "The CUDA forward comparison is calibrated against measured same-shape "
+                    "repeat variability because GPU scatter/GEMM reductions are not bitwise "
+                    "deterministic in this execution path."
                 ),
             },
             "fine_edge_index_restored_after_pool_unpool": True,
@@ -394,7 +420,10 @@ def main() -> None:
     print(f"variance shape: {tuple(variance_batch_cpu.shape)}")
     print(f"max epsilon NRMSE: {epsilon_max_nrmse:.3e}")
     print(f"max variance NRMSE: {variance_max_nrmse:.3e}")
-    print(f"numerical NRMSE threshold: {NUMERICAL_NRMSE_THRESHOLD:.1e}")
+    print(f"allowed epsilon NRMSE: {epsilon_allowed_nrmse:.3e}")
+    print(f"allowed variance NRMSE: {variance_allowed_nrmse:.3e}")
+    print(f"epsilon / repeat NRMSE ratio: {epsilon_variability_ratio:.3f}")
+    print(f"variance / repeat NRMSE ratio: {variance_variability_ratio:.3f}")
     print(f"numerical equivalence passed: {numerical_equivalence_passed}")
     print(f"same-shape repeat epsilon NRMSE: {epsilon_repeat_stats['nrmse']:.3e}")
     print(f"same-shape repeat variance NRMSE: {variance_repeat_stats['nrmse']:.3e}")
@@ -405,8 +434,9 @@ def main() -> None:
     if not numerical_equivalence_passed:
         raise AssertionError(
             "D9 structural batching is valid, but batched-vs-independent numerical drift "
-            f"exceeded NRMSE threshold {NUMERICAL_NRMSE_THRESHOLD:.1e}: "
-            f"epsilon={epsilon_max_nrmse:.3e}, variance={variance_max_nrmse:.3e}. "
+            "is materially larger than measured same-shape GPU variability: "
+            f"epsilon={epsilon_max_nrmse:.3e} (allowed {epsilon_allowed_nrmse:.3e}), "
+            f"variance={variance_max_nrmse:.3e} (allowed {variance_allowed_nrmse:.3e}). "
             f"Diagnostic manifest was written to {manifest_path}."
         )
 
