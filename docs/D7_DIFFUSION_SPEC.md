@@ -1,0 +1,186 @@
+# D7 — Canonical Improved-DDPM contract
+
+D7 freezes the diffusion mathematics used by the physical-space HIT DGN baseline.
+It does not change the D6 multiscale backbone, D5 hierarchy, or D3 data scaling.
+
+## Source lineage
+
+The pre-D7 `dgn4avbp/diffusion_process.py` is inherited directly from the
+original DGN4CFD repository. Its forward process, posterior coefficients,
+linear/cosine schedules, epsilon reverse mean, and learned-range variance are
+kept as the source implementation.
+
+The D7 audit compares that inherited logic with *Improved Denoising Diffusion
+Probabilistic Models* and OpenAI's released `improved-diffusion` code.
+
+## Canonical baseline
+
+```text
+T                    = 1000
+schedule             = linear
+beta_0               = 1e-4
+beta_{T-1}           = 2e-2
+model mean target    = epsilon
+variance             = learned range
+lambda_vlb           = 0.001
+timestep input       = raw integer r in [0, 999]
+sampling             = ancestral DDPM
+physical state       = 5 standardized nondimensional conservative channels
+```
+
+The 1000-step linear schedule is deliberately retained because this stage first
+establishes a faithful physical DGN baseline. Cosine schedules are an ablation,
+not a silent baseline change.
+
+For `T=1000`, passing the raw integer timestep to the sinusoidal embedding is
+also numerically on the same 0–1000 scale as the common optional timestep
+rescaling in Improved-DDPM.
+
+## Forward process
+
+For standardized physical state `x_0`,
+
+```text
+q(x_t | x_0) = N(sqrt(alpha_bar_t) x_0, (1-alpha_bar_t) I)
+```
+
+or
+
+```text
+x_t = sqrt(alpha_bar_t) x_0 + sqrt(1-alpha_bar_t) epsilon,
+epsilon ~ N(0, I).
+```
+
+This is already implemented by `DiffusionProcess.__call__` and is preserved.
+
+## Reverse mean: epsilon prediction
+
+The model predicts `epsilon_theta(x_t,t)`. The reverse mean is
+
+```text
+mu_theta = 1/sqrt(alpha_t)
+           * (x_t - beta_t/sqrt(1-alpha_bar_t) * epsilon_theta).
+```
+
+D7 exposes this explicitly through `epsilon_reverse_mean`.
+
+## Learned-range reverse variance
+
+The D6 network has ten output channels: five epsilon channels and five variance
+channels. Following Improved-DDPM, the raw variance-head output is mapped by
+
+```text
+frac = (model_v + 1) / 2
+log Sigma_theta = frac * log(beta_t)
+                  + (1-frac) * log(tilde_beta_t_clipped).
+```
+
+No hard clamp is applied to `model_v`, matching the released Improved-DDPM
+implementation and the paper's statement that the interpolation variable is not
+constrained.
+
+## Hybrid objective and the DGN4CFD scaling issue
+
+The paper defines
+
+```text
+L_hybrid = L_simple + lambda_vlb L_vlb,
+lambda_vlb = 0.001.
+```
+
+`L_simple` is an expectation over sampled timesteps, whereas `L_vlb` is a sum of
+per-timestep VLB terms. The training sampler uses importance weights
+
+```text
+1 / (T p(t)),
+```
+
+which estimate a timestep average. Therefore a sampled VLB term must be weighted
+by
+
+```text
+lambda_vlb * T.
+```
+
+For the frozen baseline,
+
+```text
+0.001 * 1000 = 1.0.
+```
+
+The inherited DGN4CFD `HybridLoss` instead applies only `0.001` to the sampled
+per-timestep VLB term. Under the existing sampler convention this makes the VLB
+contribution 1000 times smaller than the paper objective for `T=1000`.
+
+D7 therefore introduces `CanonicalHybridLoss` and `hybrid_loss_terms`. The
+legacy class is retained for provenance but is not the canonical training loss.
+
+The epsilon prediction is detached in the VLB branch, so the VLB trains the
+variance head while the simple MSE remains the source of gradient for the mean
+prediction.
+
+## Continuous CFD decoder likelihood at t=0
+
+OpenAI's image implementation uses a discretized image likelihood at `t=0`.
+That likelihood is tied to quantized image intensities and is not appropriate
+for continuous CFD state variables.
+
+D7 instead uses a continuous Gaussian decoder negative log likelihood at `t=0`.
+Both the KL branch and decoder branch are expressed in bits per dimension.
+
+## Final reverse step
+
+The learned-range variance uses a clipped posterior variance at `t=0`, so its
+numerical value is non-zero. That does **not** mean Gaussian noise should be
+added after the final reverse mean.
+
+Canonical ancestral DDPM sampling is
+
+```text
+x_{t-1} = mu_theta + 1[t != 0] sqrt(Sigma_theta) z.
+```
+
+The original DGN4CFD `DiffusionModel.sample` omitted this mask and therefore
+added stochastic noise at `t=0`. D7's `ancestral_sample_step` explicitly
+suppresses the stochastic term at the final step.
+
+`sample_unconditional_physical_dgn` is the canonical D7 sampling core for the
+D0 physical-space, unconditional HIT contract. The older generic sampler is
+kept unchanged for provenance until generic latent/conditional generation is
+revisited.
+
+## Files
+
+```text
+configs/diffusion/improved_ddpm_hit.yaml
+dgn4avbp/improved_ddpm.py
+dgn4avbp/diffusion_loss.py
+tests/test_improved_ddpm.py
+scripts/validate_d7_diffusion.py
+slurm/dgn_d7_check.slurm
+artifacts/d7_diffusion_manifest.json  # generated by validation
+```
+
+## D7 validation gates
+
+D7 requires:
+
+- learned-range endpoint equivalence;
+- sampled VLB multiplier `lambda_vlb*T = 1`;
+- stop-gradient of VLB with respect to epsilon head;
+- finite continuous decoder likelihood at `t=0`;
+- no stochastic contribution to the ancestral sample at `t=0`;
+- a stochastic contribution for `t>0`;
+- preservation of all D0–D6 tests.
+
+## Deferred
+
+D7 does not own:
+
+- loss-second-moment sampler state/validation reproducibility (D8);
+- hierarchy-aware multi-sample batching (D9);
+- DDP (deferred);
+- checkpoint/restart policy;
+- production training/generation CLIs;
+- cosine schedule or diffusion-schedule ablations;
+- VGAE/latent DGN.
