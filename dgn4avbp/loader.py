@@ -17,7 +17,9 @@ class Collater(object):
     so PyG's native increment leaves the final indices in the level-L node
     space. Parent maps ``idx{L-1}_to_idx{L}`` do not contain ``index`` and thus
     require the complete cumulative level-L offset explicitly. ``batch_L`` is
-    handled natively by PyG because its key contains ``batch``.
+    handled natively by PyG because its key contains ``batch``. Hexahedral
+    ``cells`` also need an explicit fine-level node offset because PyG does not
+    recognize that attribute as connectivity.
     """
 
     def __init__(self, transform: transforms.Compose = None):
@@ -48,6 +50,17 @@ class Collater(object):
                     )
             if hasattr(graph, f"edge_index_{max_level + 1}"):
                 raise ValueError("All graphs in a hierarchy batch must expose the same number of levels.")
+
+        # ``cells`` stores fine-node connectivity but its key does not activate
+        # PyG's index increment heuristic.
+        has_cells = [hasattr(graph, "cells") for graph in batch]
+        if any(has_cells) and not all(has_cells):
+            raise ValueError("Either every graph in a batch must expose cells or none of them may do so.")
+        if all(has_cells):
+            cumulative_fine_nodes = int(elem.num_nodes)
+            for graph in batch[1:]:
+                graph.cells = graph.cells + cumulative_fine_nodes
+                cumulative_fine_nodes += int(graph.num_nodes)
 
         # Correct hierarchy indices before delegating the actual concatenation
         # to PyG. Graph 0 needs no correction; cumulative counts describe all
