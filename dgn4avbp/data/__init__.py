@@ -44,7 +44,9 @@ from .topology import (
     expected_nonperiodic_cartesian_degree_histogram,
     expected_nonperiodic_cartesian_directed_edges,
     infer_cartesian_grid,
-    validate_native_hit_topology,
+    run_hit_cartesian_diagnostics,
+    validate_hit_cartesian_diagnostics,
+    validate_native_hex_topology,
     write_topology_manifest,
 )
 
@@ -88,6 +90,8 @@ __all__ = [
     "expected_nonperiodic_cartesian_degree_histogram",
     "expected_nonperiodic_cartesian_directed_edges",
     "infer_cartesian_grid",
-    "validate_native_hit_topology",
+    "run_hit_cartesian_diagnostics",
+    "validate_hit_cartesian_diagnostics",
+    "validate_native_hex_topology",
     "write_topology_manifest",
 ]
