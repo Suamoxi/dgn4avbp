@@ -1,0 +1,43 @@
+name: dgn_hit_baseline
+
+# Physical-space DGN baseline for the fixed HIT mesh.
+# D6 validates only the neural backbone/interface. D7 owns diffusion-process
+# equations, schedule, loss, and sampling behavior.
+learnable_variance: true
+
+hierarchy:
+  # D5 provides 8 usable graph levels:
+  # 35937 -> 17969 -> 5121 -> 1210 -> 241 -> 50 -> 12 -> 3 nodes.
+  # Use the first 7 levels, leaving 12 nodes at the bottleneck. The final
+  # 3-node level is retained in the D5 artifact for later ablation but is not
+  # part of the canonical D6 baseline.
+  num_levels: 7
+  selection: prefix
+  excluded_available_levels: [8]
+  rationale: >-
+    Use a global multiscale bottleneck without collapsing the representation to
+    the almost-degenerate 3-node final D5 level. Scale-count ablation remains a
+    later experiment; this fixes one reproducible baseline.
+
+arch:
+  in_node_features: 5
+  cond_node_features: 0
+  # Three components of nondimensional relative position x_j/L_ref-x_i/L_ref.
+  cond_edge_features: 3
+
+  # Original DGN4CFD examples use two InteractionNetwork blocks per scale for
+  # the larger physical-space cases. Seven entries correspond to seven selected
+  # D5 hierarchy levels.
+  depths: [2, 2, 2, 2, 2, 2, 2]
+  fnns_depth: 2
+  fnns_width: 128
+  aggr: sum
+  dropout: 0.1
+  emb_width: 512
+  dim: 3
+  scalar_rel_pos: false
+
+output_contract:
+  epsilon_channels: 5
+  variance_channels: 5
+  total_channels: 10
