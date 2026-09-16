@@ -1,14 +1,51 @@
-# D4 — Native HIT topology validation
+# D4 — Native mesh topology validation
 
 ## Purpose
 
-D4 validates the fixed HIT mesh topology used by the physical-space DGN baseline. It does not modify the mesh and does not add periodic closure.
+D4 validates the topology used by the physical-space DGN baseline without assuming that an AVBP mesh is Cartesian, uniform, or structured.
 
-The active graph must represent only the native hexahedral nearest-neighbour edges present in `Connectivity/hex->node`.
+The hard D4 contract is:
+
+```text
+native AVBP hexahedral connectivity
+        -> graph topology
+        -> relative edge geometry
+```
+
+For the current D1 data path, one mesh node is one graph vertex and `Connectivity/hex->node` is the authoritative topology source. D4 does not modify that mesh and does not add periodic closure.
+
+The current HIT case happens to be a structured box. Those Cartesian properties are useful diagnostics for this dataset, but they are not requirements of DGN4AVBP and are not part of the generic D4 pass/fail criterion.
+
+## Core topology contract
+
+`validate_native_hex_topology` verifies the following for any hexahedral mesh handled by the current D1 loader:
+
+- node coordinates are finite;
+- hexahedral connectivity has shape `[num_cells, 8]`;
+- connectivity indices lie inside the mesh node range;
+- a cell does not repeat a local node index;
+- the active `edge_index` is exactly the coalesced bidirectional graph derived from native connectivity;
+- the graph contains no self-loops;
+- the graph is exactly bidirectional;
+- `edge_attr` has the correct shape and is finite;
+- `edge_attr = pos[j] - pos[i]` exactly in raw dimensional coordinates;
+- graph edges do not have zero geometric length;
+- no edge beyond those generated from `Connectivity/hex->node` is added by D4/D1.
+
+No requirement is placed on:
+
+- Cartesian alignment;
+- uniform spacing;
+- box-shaped domains;
+- a specific node degree distribution;
+- a specific number of nodes or cells;
+- tensor-product coordinate planes.
+
+This is the topology contract that future arbitrary AVBP hexahedral meshes must satisfy.
 
 ## Local hexahedron edge mappings
 
-The current D1 loader uses the standard local cube edge list
+The current D1 loader uses
 
 ```text
 (0,1) (1,2) (2,3) (3,0)
@@ -24,44 +61,11 @@ The legacy `utils.convert_element_to_coo` code used
 (0,3) (1,2) (5,6) (4,7)
 ```
 
-Although the order looks different, both lists contain exactly the same 12 undirected local cube edges. D4 verifies both the local-set equivalence and that they produce the same coalesced global directed graph on the real HIT mesh.
+Although the order looks different, both lists contain the same 12 undirected local cube edges. D4 verifies both the local-set equivalence and that both lists generate the same coalesced global directed graph.
 
-## HIT mesh contract
+## D3 geometry interface
 
-For the validated HIT case, D4 requires the raw coordinates to form a complete Cartesian tensor-product grid. From D1/D3 this is expected to be
-
-```text
-33 x 33 x 33 nodes
-32 x 32 x 32 hexahedral cells
-```
-
-with physical span `L_ref` in each direction.
-
-With no periodic closure, the native grid spacing is
-
-```text
-h = L_ref / 32
-```
-
-and the nondimensional spacing after D3 geometry scaling is
-
-```text
-h* = 1 / 32 = 0.03125.
-```
-
-## Edge geometry
-
-Every active graph edge must be an axis-aligned nearest-neighbour mesh edge:
-
-- exactly one coordinate changes;
-- its magnitude equals the corresponding native grid spacing;
-- the other two coordinate differences are zero within numerical tolerance;
-- no edge spans more than one grid interval;
-- no edge directly connects opposite box faces.
-
-`edge_attr` must equal `pos[j] - pos[i]` exactly in raw dimensional coordinates.
-
-The D3 preprocessed graph must satisfy
+The D3 preprocessed graph must still satisfy the hard interface contract
 
 ```text
 pos* = pos / L_ref
@@ -70,18 +74,44 @@ edge_attr* = edge_attr / L_ref
 
 with no statistical standardization of coordinates or edge geometry.
 
-## Expected nonperiodic degree distribution
+The current reference configuration must also match the reference configuration frozen in the D3 preprocessing manifest.
 
-For a `33^3` Cartesian grid with only axial nearest-neighbour edges:
+## Optional HIT Cartesian diagnostics
 
-- 8 corner nodes have degree 3;
-- 372 edge-interior nodes have degree 4;
-- 5766 face-interior nodes have degree 5;
-- 29791 volume-interior nodes have degree 6.
+Because `HIT_LES_FORCED` is expected to be a regular box, D4 also runs a separate diagnostic via `run_hit_cartesian_diagnostics`.
 
-The degree sum is therefore 209088, which is also the number of stored directed edges because the PyG graph contains both directions.
+For this case only, the diagnostic examines:
 
-A periodic closure would instead alter boundary degrees and introduce direct opposite-face edges. D4 explicitly requires both effects to be absent.
+- whether coordinates form a complete Cartesian tensor-product grid;
+- coordinate-plane counts;
+- physical span compared with `L_ref`;
+- uniform grid spacing;
+- expected Cartesian edge count;
+- expected nonperiodic degree histogram;
+- whether every edge is one axis-aligned nearest-neighbour interval;
+- whether direct cross-box or opposite-face edges appear.
+
+For the known HIT dataset, the expected values are approximately
+
+```text
+33 x 33 x 33 nodes
+32 x 32 x 32 hexahedral cells
+h = L_ref / 32
+h* = 1 / 32 = 0.03125
+```
+
+and the expected nonperiodic degree distribution is
+
+```text
+degree 3:     8
+degree 4:   372
+degree 5:  5766
+degree 6: 29791
+```
+
+These checks are **diagnostic only**. A failure is written into the D4 manifest but does not invalidate the generic topology contract. This separation is intentional: an unstructured or deformed AVBP mesh must be allowed to pass D4 when its native connectivity and graph construction are correct.
+
+Coordinate-plane clustering used by this optional diagnostic is tolerant to tiny floating-point roundoff so that numerically equivalent planes are not counted twice.
 
 ## Persistence
 
@@ -91,7 +121,16 @@ A periodic closure would instead alter boundary degrees and introduce direct opp
 artifacts/d4_topology_manifest.json
 ```
 
-containing the inferred Cartesian grid, raw and nondimensional spacing, degree histogram, edge-geometry diagnostics, local-mapping equivalence, D2 dataset fingerprint, and D3 training-file fingerprint.
+The manifest contains:
+
+- generic native-connectivity validation results;
+- observed degree histogram;
+- generic edge-length diagnostics;
+- local-mapping equivalence;
+- D2 dataset fingerprint;
+- D3 training-file fingerprint;
+- D3 geometry consistency;
+- optional HIT Cartesian diagnostics and their `passed` or `failed` status.
 
 ## Non-goals
 
@@ -99,6 +138,8 @@ D4 does not:
 
 - add periodic edges;
 - apply minimum-image relative positions;
+- require a Cartesian grid;
+- require uniform spacing;
 - construct the multiscale Guillard hierarchy;
 - change the DGN architecture;
 - change diffusion math;
