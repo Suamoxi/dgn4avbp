@@ -1,0 +1,24 @@
+name: hit_timestep_policy
+
+training:
+  sampler: loss_second_moment
+  history_per_term: 10
+  uniform_prob: 0.001
+  importance_weight: inverse_Tp
+  sampler_update_loss: unweighted_per_sample_hybrid_loss
+
+validation:
+  deterministic: true
+  base_seed: 42
+  key: sample_id
+  timestep_assignment: sha256_mod_num_steps
+  noise_assignment: sha256_seeded_cpu_gaussian
+  fixed_across_epochs: true
+  independent_of_iteration_order: true
+  mutate_training_sampler: false
+  interpretation: stable_monitoring_metric_not_exact_full_T_vlb_estimator
+
+scope:
+  single_gpu: true
+  hierarchy_aware_multi_sample_batching: deferred_to_D9
+  checkpoint_sampler_state: deferred_to_D11
