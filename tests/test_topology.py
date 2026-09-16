@@ -84,6 +84,25 @@ def test_structured_native_topology_passes() -> None:
     assert manifest["local_hex_edge_mappings"]["same_global_directed_edge_set"] is True
 
 
+def test_coordinate_roundoff_does_not_create_fake_grid_plane() -> None:
+    dataset = _structured_grid_dataset()
+
+    # Split one nominal x=1 plane into two exact float32 coordinate values by a
+    # perturbation tiny compared with the native cell width. This reproduces the
+    # real HIT failure where exact unique counts were 34,34,33.
+    plane = torch.nonzero(dataset.pos[:, 0] == 1.0, as_tuple=False).flatten()
+    dataset.pos[plane[0], 0] += 1.0e-6
+    dataset.edge_attr = dataset.pos[dataset.edge_index[1]] - dataset.pos[dataset.edge_index[0]]
+
+    manifest = validate_native_hit_topology(dataset, L_ref=2.0)
+
+    grid = manifest["cartesian_grid"]
+    assert grid["axis_counts"] == [3, 3, 3]
+    assert grid["axis_exact_unique_counts"] == [4, 3, 3]
+    assert grid["axis_merged_exact_values"] == [1, 0, 0]
+    assert grid["axis_max_coordinate_cluster_spread"][0] > 0.0
+
+
 def test_extra_opposite_face_edge_is_rejected() -> None:
     dataset = _structured_grid_dataset()
     extra = torch.tensor([[0, 2], [2, 0]], dtype=torch.long)
