@@ -15,15 +15,19 @@ from dgn4avbp.data import (
     load_preprocessing_manifest,
     load_reference_config,
     load_split_manifest,
+    run_hit_cartesian_diagnostics,
     standardizer_from_manifest,
+    validate_native_hex_topology,
     validate_preprocessing_manifest,
     validate_split_manifest,
+    write_topology_manifest,
 )
-from dgn4avbp.data.topology import validate_native_hit_topology, write_topology_manifest
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate D4 native HIT mesh topology.")
+    parser = argparse.ArgumentParser(
+        description="Validate D4 native mesh topology with optional HIT Cartesian diagnostics."
+    )
     parser.add_argument(
         "--data-config",
         default="configs/data/avbp_hdf5_fixed_mesh_local.yaml",
@@ -68,11 +72,15 @@ def main() -> None:
         )
 
     refs = HITReferenceScales.from_config(reference_cfg)
-    manifest = validate_native_hit_topology(dataset, L_ref=refs.L_ref)
+
+    # Core D4 pass/fail contract: graph topology follows native mesh
+    # connectivity. No Cartesian or structured-grid assumption is made here.
+    manifest = validate_native_hex_topology(dataset)
 
     # D4 also checks that the frozen D3 wrapper expresses exactly the same
-    # relative geometry in nondimensional units, without any statistical
-    # coordinate scaling.
+    # relative geometry in nondimensional units, without statistical coordinate
+    # scaling. This is part of the preprocessing/topology interface contract and
+    # remains a hard check.
     standardizer = standardizer_from_manifest(preprocessing_manifest)
     processed = PreprocessedFixedMeshDataset(dataset, refs, standardizer)
     torch.testing.assert_close(
@@ -88,6 +96,11 @@ def main() -> None:
         atol=1e-7,
     )
 
+    # HIT happens to use a structured box, so retain the old Cartesian checks as
+    # useful diagnostics. They are explicitly non-fatal: an arbitrary AVBP mesh
+    # can satisfy D4 even when these case-specific assumptions do not apply.
+    hit_cartesian = run_hit_cartesian_diagnostics(dataset, L_ref=refs.L_ref)
+
     manifest["dataset_fingerprint_sha256"] = split_manifest[
         "ordered_file_fingerprint_sha256"
     ]
@@ -100,28 +113,20 @@ def main() -> None:
         "edge_attr_equal_raw_over_L_ref": True,
         "coordinates_statistically_standardized": False,
     }
+    manifest["optional_diagnostics"] = {
+        "hit_cartesian": hit_cartesian,
+    }
 
     write_topology_manifest(manifest, args.manifest)
 
-    print("D4 topology validation passed")
+    print("D4 generic topology validation passed")
     print(f"mesh: {manifest['mesh_id']}")
     print(f"nodes: {manifest['num_nodes']}")
     print(f"cells: {manifest['num_cells']}")
     print(f"directed edges: {manifest['num_directed_edges']}")
-    print(f"axis counts: {manifest['cartesian_grid']['axis_counts']}")
-    print(f"physical span: {manifest['cartesian_grid']['axis_span']}")
-    print(f"physical spacing: {manifest['cartesian_grid']['axis_spacing']}")
-    print(
-        "nondimensional spacing: "
-        f"{manifest['cartesian_grid']['nondimensional_spacing']}"
-    )
+    print(f"spatial dim: {manifest['spatial_dim']}")
     print(f"degree histogram: {manifest['degree_histogram']['observed']}")
-    print(
-        "nearest-neighbor fraction: "
-        f"{manifest['edge_geometry']['nearest_neighbor_fraction']}"
-    )
-    print(f"cross-box edges: {manifest['edge_geometry']['cross_box_edges']}")
-    print(f"opposite-face edges: {manifest['edge_geometry']['opposite_face_edges']}")
+    print(f"edge geometry: {manifest['edge_geometry']}")
     print(
         "legacy/current local mapping equivalent: "
         f"{manifest['local_hex_edge_mappings']['same_undirected_local_edge_set']}"
@@ -132,6 +137,22 @@ def main() -> None:
     )
     print(f"periodic closure added: {manifest['periodic_closure_added']}")
     print("D3 reference config matches current: True")
+
+    print("HIT Cartesian diagnostic status:", hit_cartesian["status"])
+    if hit_cartesian["status"] == "passed":
+        grid = hit_cartesian["cartesian_grid"]
+        geom = hit_cartesian["edge_geometry"]
+        print(f"  axis counts: {grid['axis_counts']}")
+        print(f"  physical span: {grid['axis_span']}")
+        print(f"  physical spacing: {grid['axis_spacing']}")
+        print(f"  nondimensional spacing: {grid['nondimensional_spacing']}")
+        print(f"  nearest-neighbor fraction: {geom['nearest_neighbor_fraction']}")
+        print(f"  cross-box edges: {geom['cross_box_edges']}")
+        print(f"  opposite-face edges: {geom['opposite_face_edges']}")
+    else:
+        print(f"  diagnostic error: {hit_cartesian['error_type']}: {hit_cartesian['message']}")
+        print("  This does not invalidate the D4 generic topology contract.")
+
     print(f"manifest: {Path(args.manifest).resolve()}")
 
 
