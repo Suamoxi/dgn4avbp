@@ -40,6 +40,21 @@ def test_loss_second_moment_sampler_is_uniform_until_warmup() -> None:
     np.testing.assert_allclose(sampler.weights, np.ones(4))
 
 
+def test_loss_second_moment_sampler_diagnostics_track_warmup() -> None:
+    sampler = ImportanceStepSampler(num_diffusion_steps=4, min_history_length=2, uniform_prob=0.001)
+    sampler.update(
+        torch.tensor([0, 0, 1, 3, 3]),
+        torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0]),
+    )
+    diagnostics = sampler.diagnostics()
+    assert diagnostics["warmed_up"] is False
+    assert diagnostics["min_history_count"] == 0
+    assert diagnostics["max_history_count"] == 2
+    assert diagnostics["mean_history_count"] == 1.25
+    assert diagnostics["observed_timesteps_fraction"] == 0.75
+    assert diagnostics["full_history_fraction"] == 0.5
+
+
 def test_loss_second_moment_weights_match_reference_formula() -> None:
     sampler = ImportanceStepSampler(num_diffusion_steps=3, min_history_length=2, uniform_prob=0.001)
     timesteps = torch.tensor([0, 0, 1, 1, 2, 2])
