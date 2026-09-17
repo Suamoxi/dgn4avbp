@@ -1,0 +1,59 @@
+name: dgn_hit_baseline_c0_30e
+seed: 42
+
+data:
+  data_config: configs/data/avbp_hdf5_fixed_mesh_local.yaml
+  split_manifest: artifacts/d2_split_manifest.json
+  reference_config: configs/data/hit_reference_scales.yaml
+  preprocessing_manifest: artifacts/d3_preprocessing_manifest.json
+  hierarchy_artifact: artifacts/d5_hierarchy.pt
+  hierarchy_manifest: artifacts/d5_hierarchy_manifest.json
+
+model_config: configs/model/dgn_hit_baseline.yaml
+diffusion_config: configs/diffusion/improved_ddpm_hit.yaml
+policy_config: configs/diffusion/hit_timestep_policy.yaml
+
+training:
+  epochs: 30
+  batch_size: 2
+  num_workers: 1
+  learning_rate: 1.0e-4
+  grad_clip_norm: 1.0
+  mixed_precision: false
+  checkpoint_every_epochs: 1
+  checkpoint_path: checkpoints/dgn_hit_baseline_c0_30e_last.pt
+  best_checkpoint_path: checkpoints/dgn_hit_baseline_c0_30e_best.pt
+  scheduler:
+    type: reduce_on_plateau
+    monitor: train_weighted_loss
+    factor: 0.1
+    patience: 250
+    min_lr: 1.0e-8
+
+validation:
+  batch_size: 2
+  num_workers: 1
+  every_epochs: 1
+  deterministic: true
+
+logging:
+  tensorboard_dir: runs/dgn_hit_baseline_c0_30e
+  metrics_jsonl: runs/dgn_hit_baseline_c0_30e/metrics.jsonl
+
+generation:
+  checkpoint_path: checkpoints/dgn_hit_baseline_c0_30e_best.pt
+  num_samples: 1
+  batch_size: 1
+  num_spaced_steps: null
+  spaced_schedule: linear
+  output_dir: generated/dgn_hit_baseline_c0_30e
+
+scientific_contract:
+  single_gpu: true
+  ddp: false
+  physical_space: true
+  unconditional: true
+  checkpoint_resume: epoch_boundary_exact
+  production_sampler: full_ancestral_ddpm
+  controlled_baseline_probe: true
+  intended_optimizer_steps: 15150
