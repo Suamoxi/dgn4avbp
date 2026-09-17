@@ -116,6 +116,19 @@ class ImportanceStepSampler(StepSampler):
                 self._loss_history[r, self._loss_counts[r]] = loss
                 self._loss_counts[r] += 1
 
+    def diagnostics(self) -> dict:
+        """Return read-only warm-up diagnostics for training monitoring."""
+
+        counts = self._loss_counts
+        return {
+            "warmed_up": bool(self._warmed_up()),
+            "min_history_count": int(counts.min()),
+            "max_history_count": int(counts.max()),
+            "mean_history_count": float(counts.mean()),
+            "observed_timesteps_fraction": float(np.mean(counts > 0)),
+            "full_history_fraction": float(np.mean(counts == self.min_history_length)),
+        }
+
     def state_dict(self) -> dict:
         state = super().state_dict()
         state.update(
