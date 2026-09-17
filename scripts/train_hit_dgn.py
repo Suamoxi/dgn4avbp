@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +47,29 @@ def _seed_everything(seed: int) -> None:
 
 def _average(records: list[dict], key: str) -> float:
     return float(sum(record[key] for record in records) / len(records))
+
+
+def _checkpoint_metadata(
+    *,
+    role: str,
+    config_path: str,
+    best_validation_loss: float,
+    bundle,
+    truncated_epoch: bool,
+) -> dict:
+    return {
+        "contract": "d12_hit_physical_dgn_training",
+        "checkpoint_role": role,
+        "best_validation_loss": best_validation_loss,
+        "training_config": str(Path(config_path)),
+        "dataset_fingerprint_sha256": bundle.split_manifest[
+            "ordered_file_fingerprint_sha256"
+        ],
+        "hierarchy_fingerprint_sha256": bundle.hierarchy[
+            "hierarchy_fingerprint_sha256"
+        ],
+        "truncated_epoch_for_smoke_test": truncated_epoch,
+    }
 
 
 def main() -> None:
@@ -105,6 +129,8 @@ def main() -> None:
     )
 
     checkpoint_path = Path(args.checkpoint or training_cfg["checkpoint_path"])
+    best_checkpoint_value = training_cfg.get("best_checkpoint_path")
+    best_checkpoint_path = Path(best_checkpoint_value) if best_checkpoint_value else None
     start_epoch = 0
     global_step = 0
     best_validation_loss = float("inf")
@@ -141,6 +167,9 @@ def main() -> None:
     validation_seed = int(policy_cfg["validation"]["base_seed"])
 
     for epoch in range(start_epoch + 1, epochs + 1):
+        epoch_start = time.perf_counter()
+        torch.cuda.reset_peak_memory_stats(device)
+
         train_records: list[dict] = []
         for batch_index, graph in enumerate(train_loader):
             if args.max_train_batches is not None and batch_index >= args.max_train_batches:
@@ -165,6 +194,7 @@ def main() -> None:
         grad_norm = _average(train_records, "grad_norm")
 
         validation_loss = None
+        validation_improved = False
         if epoch % int(validation_cfg["every_epochs"]) == 0:
             val_records: list[dict] = []
             for batch_index, graph in enumerate(val_loader):
@@ -183,7 +213,9 @@ def main() -> None:
             if not val_records:
                 raise RuntimeError("Validation produced no batches.")
             validation_loss = _average(val_records, "loss")
-            best_validation_loss = min(best_validation_loss, validation_loss)
+            validation_improved = validation_loss < best_validation_loss
+            if validation_improved:
+                best_validation_loss = validation_loss
 
         monitor_name = str(scheduler_cfg["monitor"])
         if monitor_name == "train_weighted_loss":
@@ -196,6 +228,9 @@ def main() -> None:
             raise ValueError(f"Unsupported scheduler monitor '{monitor_name}'.")
         scheduler.step(scheduler_value)
 
+        sampler_diagnostics = step_sampler.diagnostics()
+        epoch_seconds = float(time.perf_counter() - epoch_start)
+        peak_cuda_memory_bytes = int(torch.cuda.max_memory_allocated(device))
         epoch_metrics = {
             "epoch": epoch,
             "global_step": global_step,
@@ -205,6 +240,10 @@ def main() -> None:
             "grad_norm": grad_norm,
             "validation_loss": validation_loss,
             "best_validation_loss": best_validation_loss,
+            "validation_improved": validation_improved,
+            "epoch_seconds": epoch_seconds,
+            "peak_cuda_memory_bytes": peak_cuda_memory_bytes,
+            "sampler": sampler_diagnostics,
         }
         print(json.dumps(epoch_metrics, sort_keys=True))
         with metrics_path.open("a", encoding="utf-8") as stream:
@@ -213,6 +252,23 @@ def main() -> None:
         writer.add_scalar("loss/train_unweighted", train_unweighted, epoch)
         writer.add_scalar("optimization/grad_norm", grad_norm, epoch)
         writer.add_scalar("optimization/lr", optimizer.param_groups[0]["lr"], epoch)
+        writer.add_scalar("runtime/epoch_seconds", epoch_seconds, epoch)
+        writer.add_scalar("runtime/peak_cuda_memory_bytes", peak_cuda_memory_bytes, epoch)
+        writer.add_scalar(
+            "sampler/observed_timesteps_fraction",
+            sampler_diagnostics["observed_timesteps_fraction"],
+            epoch,
+        )
+        writer.add_scalar(
+            "sampler/full_history_fraction",
+            sampler_diagnostics["full_history_fraction"],
+            epoch,
+        )
+        writer.add_scalar(
+            "sampler/min_history_count",
+            sampler_diagnostics["min_history_count"],
+            epoch,
+        )
         if validation_loss is not None:
             writer.add_scalar("loss/validation_deterministic", validation_loss, epoch)
 
@@ -228,18 +284,34 @@ def main() -> None:
                 global_step=global_step,
                 batch_in_epoch=0,
                 data_generator=data_generator,
-                metadata={
-                    "contract": "d12_hit_physical_dgn_training",
-                    "best_validation_loss": best_validation_loss,
-                    "training_config": str(Path(args.config)),
-                    "dataset_fingerprint_sha256": bundle.split_manifest[
-                        "ordered_file_fingerprint_sha256"
-                    ],
-                    "hierarchy_fingerprint_sha256": bundle.hierarchy[
-                        "hierarchy_fingerprint_sha256"
-                    ],
-                    "truncated_epoch_for_smoke_test": args.max_train_batches is not None,
-                },
+                metadata=_checkpoint_metadata(
+                    role="latest",
+                    config_path=args.config,
+                    best_validation_loss=best_validation_loss,
+                    bundle=bundle,
+                    truncated_epoch=args.max_train_batches is not None,
+                ),
+            )
+
+        if validation_improved and best_checkpoint_path is not None:
+            save_training_checkpoint(
+                best_checkpoint_path,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=None,
+                step_sampler=step_sampler,
+                epoch=epoch,
+                global_step=global_step,
+                batch_in_epoch=0,
+                data_generator=data_generator,
+                metadata=_checkpoint_metadata(
+                    role="best_validation",
+                    config_path=args.config,
+                    best_validation_loss=best_validation_loss,
+                    bundle=bundle,
+                    truncated_epoch=args.max_train_batches is not None,
+                ),
             )
 
         if optimizer.param_groups[0]["lr"] <= float(scheduler_cfg["min_lr"]):
@@ -248,6 +320,8 @@ def main() -> None:
 
     writer.close()
     print(f"checkpoint: {checkpoint_path.resolve()}")
+    if best_checkpoint_path is not None:
+        print(f"best checkpoint: {best_checkpoint_path.resolve()}")
 
 
 if __name__ == "__main__":
