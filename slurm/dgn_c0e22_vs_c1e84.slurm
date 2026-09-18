@@ -12,7 +12,8 @@ set -euo pipefail
 PROJECT=/scratch/coop/theret/dgn4avbp
 IMAGE=/softs/local_arm/singularity/images/pyg25.03.sif
 PYTHON=/scratch/coop/theret/avbpML_env/bin/python3
-C0_CONFIG=${PROJECT}/configs/training/dgn_hit_baseline_c0_30e.yaml\nC1_CONFIG=${PROJECT}/configs/training/dgn_hit_c1_b8_e100.yaml
+C0_CONFIG=${PROJECT}/configs/training/dgn_hit_baseline_c0_30e.yaml
+C1_CONFIG=${PROJECT}/configs/training/dgn_hit_c1_b8_e100.yaml
 BENCH_CONFIG=${PROJECT}/configs/benchmark/dgn_hit_distribution.yaml
 E22_CKPT=${PROJECT}/checkpoints/dgn_hit_baseline_c0_30e_best.pt
 E84_CKPT=${PROJECT}/checkpoints/dgn_hit_c1_b8_e100_best.pt
