@@ -109,7 +109,7 @@ singularity exec --nv \
   ${IMAGE} \
   env PYTHONPATH=${PROJECT} \
   ${PYTHON} -u ${PROJECT}/scripts/generate_hit_dgn.py \
-  --config ${TRAIN_CONFIG} \
+  --config ${C0_CONFIG} \
   --checkpoint ${E22_CKPT} \
   --num-samples ${NUM_SAMPLES} \
   --batch-size ${GEN_BATCH_SIZE} \
@@ -130,7 +130,7 @@ singularity exec --nv \
   ${IMAGE} \
   env PYTHONPATH=${PROJECT} \
   ${PYTHON} -u ${PROJECT}/scripts/generate_hit_dgn.py \
-  --config ${TRAIN_CONFIG} \
+  --config ${C1_CONFIG} \
   --checkpoint ${E84_CKPT} \
   --num-samples ${NUM_SAMPLES} \
   --batch-size ${GEN_BATCH_SIZE} \
