@@ -110,20 +110,29 @@ def seam_metrics(state_nd: np.ndarray, grid) -> list[dict]:
         full = reshape_nodes_to_grid(values, grid).astype(np.float64)
         std = float(np.std(values))
         denominator = max(std, np.finfo(np.float64).eps)
-        plane_pairs = (
-            (full[0, :, :], full[-1, :, :]),
-            (full[:, 0, :], full[:, -1, :]),
-            (full[:, :, 0], full[:, :, -1]),
+        axis_views = (
+            np.moveaxis(full, 0, 0),
+            np.moveaxis(full, 1, 0),
+            np.moveaxis(full, 2, 0),
         )
-        for axis, (minimum, maximum) in zip(AXES, plane_pairs):
-            difference = minimum - maximum
-            rms = float(np.sqrt(np.mean(difference**2)))
+        for axis, axis_values in zip(AXES, axis_views):
+            duplicate_difference = axis_values[0] - axis_values[-1]
+            wrap_difference = axis_values[0] - axis_values[-2]
+            interior_difference = np.diff(axis_values[:-1], axis=0)
+
+            duplicate_rms = float(np.sqrt(np.mean(duplicate_difference**2)))
+            wrap_rms = float(np.sqrt(np.mean(wrap_difference**2)))
+            interior_rms = float(np.sqrt(np.mean(interior_difference**2)))
             rows.append(
                 {
                     "field": field,
                     "axis": axis,
-                    "seam_rms": rms,
-                    "seam_rms_over_field_std": rms / denominator,
+                    "duplicate_endpoint_rms": duplicate_rms,
+                    "duplicate_endpoint_rms_over_field_std": duplicate_rms / denominator,
+                    "fft_wrap_jump_rms": wrap_rms,
+                    "interior_adjacent_jump_rms": interior_rms,
+                    "fft_wrap_over_interior_jump": wrap_rms
+                    / max(interior_rms, np.finfo(np.float64).eps),
                 }
             )
     return rows
