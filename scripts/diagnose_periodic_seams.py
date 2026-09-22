@@ -75,16 +75,24 @@ def seam_rows(
         field_std = float(np.std(values))
         denominator = max(field_std, np.finfo(np.float64).eps)
 
-        plane_pairs = (
-            (full[0, :, :], full[-1, :, :]),
-            (full[:, 0, :], full[:, -1, :]),
-            (full[:, :, 0], full[:, :, -1]),
+        axis_views = (
+            np.moveaxis(full, 0, 0),
+            np.moveaxis(full, 1, 0),
+            np.moveaxis(full, 2, 0),
         )
-        for axis, (minimum, maximum) in zip(AXES, plane_pairs):
-            difference = minimum - maximum
-            rms = float(np.sqrt(np.mean(difference**2)))
-            mean_abs = float(np.mean(np.abs(difference)))
-            max_abs = float(np.max(np.abs(difference)))
+        for axis, axis_values in zip(AXES, axis_views):
+            # The 33rd plane is the duplicated periodic endpoint. D13 drops it
+            # before the FFT, so we report two distinct diagnostics:
+            #   1) duplicate endpoint consistency: plane 0 versus plane -1;
+            #   2) FFT wrap jump: plane 0 versus the last UNIQUE plane (-2),
+            #      normalized by ordinary interior adjacent-plane jumps.
+            duplicate_difference = axis_values[0] - axis_values[-1]
+            wrap_difference = axis_values[0] - axis_values[-2]
+            interior_difference = np.diff(axis_values[:-1], axis=0)
+
+            duplicate_rms = float(np.sqrt(np.mean(duplicate_difference**2)))
+            wrap_rms = float(np.sqrt(np.mean(wrap_difference**2)))
+            interior_rms = float(np.sqrt(np.mean(interior_difference**2)))
             rows.append(
                 {
                     "population": population,
@@ -92,10 +100,12 @@ def seam_rows(
                     "field": field_name,
                     "axis": axis,
                     "field_std": field_std,
-                    "seam_rms": rms,
-                    "seam_mean_abs": mean_abs,
-                    "seam_max_abs": max_abs,
-                    "seam_rms_over_field_std": rms / denominator,
+                    "duplicate_endpoint_rms": duplicate_rms,
+                    "duplicate_endpoint_rms_over_field_std": duplicate_rms / denominator,
+                    "fft_wrap_jump_rms": wrap_rms,
+                    "interior_adjacent_jump_rms": interior_rms,
+                    "fft_wrap_over_interior_jump": wrap_rms
+                    / max(interior_rms, np.finfo(np.float64).eps),
                 }
             )
     return rows
@@ -132,22 +142,26 @@ def summarize(rows: list[dict]) -> list[dict]:
 
     summary = []
     for (population, field, axis), values in sorted(grouped.items()):
-        normalized = np.asarray(
-            [item["seam_rms_over_field_std"] for item in values],
+        duplicate = np.asarray(
+            [item["duplicate_endpoint_rms_over_field_std"] for item in values],
             dtype=np.float64,
         )
-        raw = np.asarray([item["seam_rms"] for item in values], dtype=np.float64)
+        wrap_ratio = np.asarray(
+            [item["fft_wrap_over_interior_jump"] for item in values],
+            dtype=np.float64,
+        )
         summary.append(
             {
                 "population": population,
                 "field": field,
                 "axis": axis,
                 "num_samples": len(values),
-                "mean_seam_rms": float(np.mean(raw)),
-                "mean_normalized_seam_rms": float(np.mean(normalized)),
-                "median_normalized_seam_rms": float(np.median(normalized)),
-                "q95_normalized_seam_rms": float(np.quantile(normalized, 0.95)),
-                "max_normalized_seam_rms": float(np.max(normalized)),
+                "mean_duplicate_endpoint_rms_over_field_std": float(np.mean(duplicate)),
+                "q95_duplicate_endpoint_rms_over_field_std": float(np.quantile(duplicate, 0.95)),
+                "mean_fft_wrap_over_interior_jump": float(np.mean(wrap_ratio)),
+                "median_fft_wrap_over_interior_jump": float(np.median(wrap_ratio)),
+                "q95_fft_wrap_over_interior_jump": float(np.quantile(wrap_ratio, 0.95)),
+                "max_fft_wrap_over_interior_jump": float(np.max(wrap_ratio)),
             }
         )
     return summary
