@@ -4,6 +4,7 @@ import torch
 
 from dgn4avbp.diffusion_process import DiffusionProcess
 from dgn4avbp.reverse_sampling import (
+    ddim_eta_zero_step,
     epsilon_to_score,
     epsilon_to_x0,
     vp_integrated_beta_interval,
@@ -92,6 +93,49 @@ def test_probability_flow_ode_euler_step_formula() -> None:
     expected = xt + 0.5 * integrated_beta * xt + 0.5 * integrated_beta * score
 
     actual = vp_probability_flow_ode_euler_step(
+        process,
+        field_r=xt,
+        model_epsilon=epsilon,
+        batch=batch,
+        r=r,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_ddim_eta_zero_step_matches_adjacent_formula() -> None:
+    process = _process()
+    batch = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    r = torch.tensor([250, 700], dtype=torch.long)
+    xt = torch.randn(4, 5, dtype=torch.float64)
+    epsilon = torch.randn_like(xt)
+
+    x0_hat = epsilon_to_x0(process, xt, epsilon, batch, r)
+    alpha_prev_graph = process.alphas_cumprod[r - 1].to(torch.float64)
+    alpha_prev = alpha_prev_graph[batch].unsqueeze(-1)
+    expected = (
+        torch.sqrt(alpha_prev) * x0_hat
+        + torch.sqrt(1.0 - alpha_prev) * epsilon
+    )
+
+    actual = ddim_eta_zero_step(
+        process,
+        field_r=xt,
+        model_epsilon=epsilon,
+        batch=batch,
+        r=r,
+    )
+    torch.testing.assert_close(actual, expected, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test_ddim_eta_zero_t0_returns_x0_hat() -> None:
+    process = _process()
+    batch = torch.zeros(3, dtype=torch.long)
+    r = torch.tensor([0], dtype=torch.long)
+    xt = torch.randn(3, 5, dtype=torch.float64)
+    epsilon = torch.randn_like(xt)
+
+    expected = epsilon_to_x0(process, xt, epsilon, batch, r)
+    actual = ddim_eta_zero_step(
         process,
         field_r=xt,
         model_epsilon=epsilon,
