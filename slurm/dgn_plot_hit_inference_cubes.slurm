@@ -2,6 +2,7 @@
 #SBATCH --job-name=dgn_plot_cubes
 #SBATCH --time=00:20:00
 #SBATCH --partition=grace
+#SBATCH --gres=gpu:0
 #SBATCH --cpus-per-task=2
 #SBATCH --output=/scratch/coop/theret/dgn4avbp/logs/%x_%j.out
 #SBATCH --error=/scratch/coop/theret/dgn4avbp/logs/%x_%j.err
