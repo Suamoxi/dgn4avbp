@@ -33,6 +33,13 @@ physics:
   report_tke: true
   report_isotropy_rms_ratio: true
 
+plots:
+  channel_distributions:
+    enabled: true
+    bins: 160
+    dpi: 220
+    directory: channel_distributions
+
 outputs:
   summary: summary.json
   channel_metrics: channel_metrics.csv
