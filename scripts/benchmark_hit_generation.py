@@ -8,6 +8,12 @@ import json
 import shutil
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 
 from dgn4avbp.hit_benchmark import benchmark_hit_populations
@@ -32,6 +38,93 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _deterministic_subsample(values: np.ndarray, max_values: int, seed: int) -> np.ndarray:
+    flat = np.asarray(values).reshape(-1)
+    if flat.size <= max_values:
+        return flat
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(flat.size, size=max_values, replace=False)
+    return flat[indices]
+
+
+def _plot_channel_distributions(
+    generated: torch.Tensor,
+    reference: torch.Tensor,
+    *,
+    output_dir: Path,
+    channel_names: tuple[str, ...],
+    max_pooled_values: int,
+    bins: int,
+    dpi: int,
+) -> dict[str, str]:
+    if bins <= 0:
+        raise ValueError("Distribution plot bin count must be positive.")
+    if dpi <= 0:
+        raise ValueError("Distribution plot DPI must be positive.")
+
+    generated_np = generated.detach().cpu().numpy()
+    reference_np = reference.detach().cpu().numpy()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    outputs: dict[str, str] = {}
+    for channel, name in enumerate(channel_names):
+        # Match the deterministic pooled samples used by D13 channel W1.
+        gen_sample = _deterministic_subsample(
+            generated_np[..., channel],
+            max_pooled_values,
+            1000 + channel,
+        )
+        ref_sample = _deterministic_subsample(
+            reference_np[..., channel],
+            max_pooled_values,
+            2000 + channel,
+        )
+
+        combined = np.concatenate([gen_sample, ref_sample])
+        if not np.isfinite(combined).all():
+            raise ValueError(f"Non-finite values in distribution plot for channel {name}.")
+        value_min = float(np.min(combined))
+        value_max = float(np.max(combined))
+        if value_max <= value_min:
+            pad = max(abs(value_min) * 1.0e-6, 1.0e-12)
+            value_min -= pad
+            value_max += pad
+        edges = np.linspace(value_min, value_max, bins + 1)
+
+        fig, ax = plt.subplots(figsize=(6.0, 4.2))
+        ax.hist(
+            gen_sample,
+            bins=edges,
+            density=True,
+            histtype="step",
+            linewidth=1.5,
+            label=f"Generated (n={gen_sample.size:,})",
+        )
+        ax.hist(
+            ref_sample,
+            bins=edges,
+            density=True,
+            histtype="step",
+            linewidth=1.5,
+            linestyle="--",
+            label=f"Test (n={ref_sample.size:,})",
+        )
+        ax.set_xlabel(f"{name} (nondimensional)")
+        ax.set_ylabel("Probability density")
+        ax.set_title(f"{name}: generated vs test distribution")
+        ax.grid(alpha=0.25)
+        ax.legend(frameon=False)
+        fig.tight_layout()
+
+        filename = f"{name}.png"
+        path = output_dir / filename
+        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        outputs[name] = filename
+
+    return outputs
 
 
 def _load_generated_population(directory: Path) -> tuple[torch.Tensor, torch.Tensor, list[str], list[str]]:
@@ -114,16 +207,38 @@ def main() -> None:
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
 
+    channel_names = ("rho", "rhou", "rhov", "rhow", "rhoE")
+    max_pooled_values = int(cfg["max_pooled_values"])
+
     result = benchmark_hit_populations(
         generated,
         reference,
         generated_pos,
         L_ref=bundle.refs.L_ref,
-        channel_names=("rho", "rhou", "rhov", "rhow", "rhoE"),
+        channel_names=channel_names,
         quantiles=tuple(float(value) for value in cfg["quantiles"]),
         spectral_bands=cfg["spectra"]["bands"],
-        max_pooled_values=int(cfg["max_pooled_values"]),
+        max_pooled_values=max_pooled_values,
     )
+
+    distribution_plot_outputs: dict[str, str] = {}
+    plot_cfg = cfg.get("plots", {}).get("channel_distributions", {})
+    if bool(plot_cfg.get("enabled", False)):
+        plot_dir_name = str(plot_cfg.get("directory", "channel_distributions"))
+        plot_dir = output_dir / plot_dir_name
+        plot_files = _plot_channel_distributions(
+            generated,
+            reference,
+            output_dir=plot_dir,
+            channel_names=channel_names,
+            max_pooled_values=max_pooled_values,
+            bins=int(plot_cfg.get("bins", 160)),
+            dpi=int(plot_cfg.get("dpi", 220)),
+        )
+        distribution_plot_outputs = {
+            name: str(Path(plot_dir_name) / filename)
+            for name, filename in plot_files.items()
+        }
 
     summary = result["summary"]
     summary.update(
@@ -141,6 +256,7 @@ def main() -> None:
                 "physical_metrics": "physical_metrics.csv",
                 "spectra": "spectra.csv",
                 "spectral_bands": "spectral_bands.csv",
+                "channel_distribution_plots": distribution_plot_outputs,
             },
         }
     )
@@ -159,6 +275,10 @@ def main() -> None:
     print(f"reference test samples: {reference.shape[0]}")
     print(f"grid: {summary['grid_shape_with_periodic_endpoint']} -> FFT {summary['fft_grid_shape_unique_periodic_nodes']}")
     print(f"k_Nyquist * L_ref: {summary['k_nyquist_Lref']:.6g}")
+    if distribution_plot_outputs:
+        print("channel distribution plots:")
+        for name, path in distribution_plot_outputs.items():
+            print(f"  {name}: {path}")
     print(f"output: {output_dir}")
 
 
