@@ -2,6 +2,7 @@
 #SBATCH --job-name=dgn_diag_stage1
 #SBATCH --time=02:00:00
 #SBATCH --partition=grace
+#SBATCH --gres=gpu:0
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/coop/theret/dgn4avbp/logs/%x_%j.out
 #SBATCH --error=/scratch/coop/theret/dgn4avbp/logs/%x_%j.err
